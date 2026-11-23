@@ -1467,8 +1467,8 @@ apiRouter.post('/ai-assistant/drafts/:draftId/approve', requireMainOwnerSalimJwt
     const result = await approveAndPublishDraft(req.params.draftId, 'اعتماد ونشر مسودة التفاعلات', intervalSeconds);
     const usedInterval = result.draft.intervalSeconds || 0;
     const message = result.scheduled
-      ? `تم إرسال التفاعل الأول في «${result.draft.channelName}»، وسيتم إرسال بقية التفاعلات (${result.draft.items.length - 1}) تلقائياً بمعدل رسالة كل ${usedInterval} ثانية.`
-      : `تم اعتماد ونشر ${result.publishedMessages.length} تفاعلات في «${result.draft.channelName}».`;
+      ? `تم إرسال التفاعل الأول في «${result.draft.channelName}»، وسيُرسل الباقي تدريجياً كل ${usedInterval} ثانية.`
+      : `تم نشر ${result.publishedMessages.length} تفاعلات في «${result.draft.channelName}».`;
     return res.json({
       success: true,
       draft: result.draft,

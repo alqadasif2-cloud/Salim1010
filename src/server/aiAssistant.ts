@@ -864,11 +864,11 @@ function buildSystemInstruction(thread: AiAssistantThread, openDraft: AiAssistan
 1. خاطب المالك سليم مباشرة بالعربية الطبيعية الواضحة والمهذبة والعملية، وافهم اللهجات والطلبات غير الرسمية.
 2. نفّذ المهام فعلياً باستخدام الأدوات المتاحة بدلاً من مجرد شرح الطريقة للمستخدم. بعد تنفيذ أي أداة، اشرح بوضوح ودقة النتيجة الفعلية التي تمت.
 3. التزم بالسياق النشط: إذا انتقل المالك لقناة أو قسم في رسالة سابقة ثم قال في رسالة لاحقة "أنشئ تفاعلات" أو "اقرأ الرسائل"، استخدم القناة النشطة في السياق.
-4. الشخصيات الافتراضية والتفاعلات:
-   - عند طلب إنشاء تفاعلات أو رسائل متعددة من شخصيات افتراضية، استدعِ الأداة prepare_virtual_persona_interactions لإعداد مسودة بشخصيات يمنية (أسماء ولهجات يمنية متنوعة) وعرض قائمة الأسماء والنصوص كاملة للمالك سليم للمراجعة والاعتماد أولاً.
+4. الشخصيات الافتراضية والتفاعلات (حماية المراجعة والشفافية):
+   - عند طلب إنشاء تفاعلات أو رسائل متعددة من شخصيات افتراضية، استدعِ الأداة prepare_virtual_persona_interactions لإعداد مسودة بشخصيات يمنية متنوعة وعرضها على المالك سليم للمراجعة والاعتماد أولاً.
    - إذا حدد المالك وقتاً أو فاصلاً زمنياً بين كل رسالة وأخرى (مثل: "كل 30 ثانية" أو "كل دقيقة")، مرّر قيمة intervalSeconds بالثواني إلى prepare_virtual_persona_interactions أو confirm_pending.
    - لا تنشر التفاعلات تلقائياً قبل مراجعة المالك وموافقته.
-   - في هذا التطبيق تُميَّز الشخصيات الافتراضية بشفافية على أنها «شخصية افتراضية»، ولا تُنشأ لها حسابات مستخدمين حقيقية.
+   - في هذا التطبيق تُميَّز الشخصيات الافتراضية بشفافية على أنها «شخصية افتراضية»، ولا تُقدَّم تفاعلاتها كشهادات حقيقية لأعضاء مستقلين.
    - يُمنع منعاً باتاً كتابة عبارة "مولّد بالذكاء الاصطناعي" أو ترديدها.
 5. الإجراءات الإدارية والحساسة (إرسال رسالة قناة/خاصة، إنشاء/تعديل/حذف قناة، إضافة/إزالة عضو، تغيير دور أو حذف مستخدم، تثبيت رسالة):
    - استخدم أداة propose_* المناسبة لتجهيز الإجراء وعرض ملخصه الواضح للمالك بانتظار تأكيده الصريح.
@@ -910,11 +910,11 @@ function buildVirtualPersonaChannelMessage(
   timestamp: number
 ): ChannelMessage {
   const hashNum = crypto.createHash('md5').update(`${draft.id}:${item.id}:${index}`).digest().readUInt16BE(0);
-  const virtualSenderId = -(10001 + (hashNum % 8999));
+  const senderId = -(10001 + (hashNum % 8999));
   return {
     id: `msg_${timestamp}_${index}_${crypto.randomBytes(3).toString('hex')}`,
     channelId,
-    senderId: virtualSenderId,
+    senderId,
     senderName: item.personaName,
     senderRole: 'virtual_persona',
     senderAvatarUrl: null,
@@ -1101,7 +1101,7 @@ export async function approveAndPublishDraft(
       command: commandContext,
       target: `${channel.name} (${channel.id})`,
       status: 'pending',
-      details: `بدأ النشر المجدول: تم إرسال التفاعل الأول من أصل ${draft.items.length}، وسيتم إرسال رسالة كل ${safeInterval} ثانية حول: ${draft.topic}`,
+      details: `بدأ النشر المجدول (1/${draft.items.length}) كل ${safeInterval} ثانية حول: ${draft.topic}`,
     });
 
     dispatchAuthorizedChatPush({
@@ -1841,7 +1841,7 @@ export async function processOwnerAiChat(userText: string): Promise<{
               toolSteps.push({
                 toolName: name,
                 labelAr: res.scheduled
-                  ? `بدء النشر المجدول (${res.draft.items.length} تفاعلات)`
+                  ? `بدء النشر المجدول (${res.draft.items.length})`
                   : `نشر ${res.publishedMessages.length} تفاعلات`,
                 status: 'ok',
                 summaryAr: res.scheduled

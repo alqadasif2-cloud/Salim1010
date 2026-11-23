@@ -49,6 +49,8 @@
         "senderId": { "type": "number" },
         "senderName": { "type": "string" },
         "senderRole": { "type": "string" },
+        "isVirtualPersona": { "type": "boolean" },
+        "virtualPersonaLabel": { "type": "string" },
         "text": { "type": "string" },
         "timestamp": { "type": "number" }
       },

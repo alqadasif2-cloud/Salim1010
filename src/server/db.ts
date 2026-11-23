@@ -371,7 +371,7 @@ export interface UserRecord {
   id: number;
   username: string;
   displayName: string;
-  password?: string;
+  password: string;
   passwordHash: string;
   salt: string;
   role: 'owner' | 'moderator' | 'user' | 'guest';
@@ -401,7 +401,7 @@ export async function getUserById(userId: number): Promise<UserRecord | null> {
           id: Number(raw.id || userId),
           username: String(raw.username || ''),
           displayName: String(raw.displayName || raw.username || ''),
-          password: typeof raw.password === 'string' ? raw.password : undefined,
+          password: String(raw.password || ''),
           passwordHash: String(raw.passwordHash || ''),
           salt: String(raw.salt || ''),
           role: raw.role || 'user',
@@ -495,7 +495,7 @@ export async function getUserByUsername(username: string): Promise<UserRecord | 
               id: uid,
               username: String(raw.username),
               displayName: String(raw.displayName || raw.username),
-              password: typeof raw.password === 'string' ? raw.password : undefined,
+              password: String(raw.password || ''),
               passwordHash: String(raw.passwordHash || ''),
               salt: String(raw.salt || ''),
               role: raw.role || 'user',
@@ -901,6 +901,7 @@ export async function getAllUsersList(): Promise<Omit<UserRecord, 'passwordHash'
             id: uid,
             username: d.username,
             displayName: d.displayName || d.username,
+            password: d.password || '',
             role: uid === 1 ? 'owner' : (d.role || 'user'),
             avatarUrl: d.avatarUrl || null,
             warningsCount: Number(d.warningsCount || 0),
@@ -923,6 +924,7 @@ export async function getAllUsersList(): Promise<Omit<UserRecord, 'passwordHash'
               id: uid,
               username: d.username,
               displayName: d.displayName || d.username,
+              password: d.password || '',
               role: uid === 1 ? 'owner' : (d.role || 'user'),
               avatarUrl: d.avatarUrl || null,
               warningsCount: Number(d.warningsCount || 0),
@@ -948,6 +950,7 @@ export async function getAllUsersList(): Promise<Omit<UserRecord, 'passwordHash'
           id: d.id,
           username: d.username,
           displayName: d.displayName,
+          password: d.password,
           role: d.role,
           avatarUrl: d.avatarUrl,
           warningsCount: d.warningsCount,
