@@ -12,8 +12,8 @@
       "warningsCount": 0,
       "verifiedChannels": {},
       "isRestrictedAdmin": false,
-      "createdAt": 1795298130175,
-      "updatedAt": 1795298130175
+      "createdAt": 1795405433904,
+      "updatedAt": 1795405433904
     },
     "76": {
       "id": 76,
@@ -242,12 +242,12 @@
         "id": "owner_salim_1",
         "ownerId": 1,
         "ownerUsername": "Salim",
-        "activeSection": "ai_assistant",
-        "activeChannelId": null,
-        "activeChannelName": null,
+        "activeSection": "channels",
+        "activeChannelId": "channel_1794796754197_tt9n7",
+        "activeChannelName": "القناة العامة",
         "activePartnerId": null,
         "createdAt": 1795297574483,
-        "updatedAt": 1795298663108
+        "updatedAt": 1795406001000
       }
     },
     "messages": [],
@@ -296,6 +296,28 @@
     },
     "pendingActions": {},
     "auditLogs": [
+      {
+        "id": "aiaudit_1795405885412_ab07a00d",
+        "ownerId": 1,
+        "ownerUsername": "Salim",
+        "actionType": "read_channel_messages",
+        "command": "اقرأ آخر 5 رسائل في القناة العامة",
+        "target": "القناة العامة (channel_1794796754197_tt9n7)",
+        "status": "success",
+        "details": "قراءة آخر 5 رسائل مباشرة.",
+        "timestamp": 1795405885412
+      },
+      {
+        "id": "aiaudit_1795405885318_659ddd89",
+        "ownerId": 1,
+        "ownerUsername": "Salim",
+        "actionType": "navigate_app",
+        "command": "توجّه إلى القناة العامة",
+        "target": "القناة العامة (channel_1794796754197_tt9n7)",
+        "status": "success",
+        "details": "تم التوجيه مباشرة إلى قناة القناة العامة.",
+        "timestamp": 1795405885318
+      },
       {
         "id": "aiaudit_1795298663227_11a609ad",
         "ownerId": 1,

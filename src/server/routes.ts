@@ -76,6 +76,8 @@ import {
   saveGitHubCredentialsToVault,
 } from './githubSecretVault.ts';
 import {
+  GeminiConfigError,
+  GeminiRateLimitError,
   approveAndPublishDraft,
   cancelDraft,
   cancelPendingAction,
@@ -1445,6 +1447,19 @@ apiRouter.post('/ai-assistant/chat', requireMainOwnerSalimJwt, async (req: Reque
     const result = await processOwnerAiChat(message);
     return res.json({ success: true, ...result });
   } catch (err: any) {
+    if (err instanceof GeminiRateLimitError || err?.code === 'GEMINI_RATE_LIMIT') {
+      return res.status(429).json({
+        error: err.message,
+        code: 'GEMINI_RATE_LIMIT',
+        rateLimited: true,
+      });
+    }
+    if (err instanceof GeminiConfigError || err?.code === 'GEMINI_CONFIG_ERROR') {
+      return res.status(503).json({
+        error: err.message,
+        code: 'GEMINI_CONFIG_ERROR',
+      });
+    }
     const msg = String(err?.message || 'تعذر تنفيذ الطلب عبر المساعد الذكي');
     return res.status(500).json({ error: msg });
   }

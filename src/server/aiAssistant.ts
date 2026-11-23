@@ -28,6 +28,13 @@ import {
   type ChannelRecord,
 } from './db.ts';
 import { dispatchAuthorizedChatPush } from './fcm.ts';
+import {
+  createUsersBatchViaAssistant,
+  deleteRegularUserByAssistant,
+  isProtectedOwnerOrSystemUser,
+  updateRegularUserByAssistant,
+  type CreatedUserCredential,
+} from './ownerUserAdmin.ts';
 
 const OWNER_ID = 1;
 const OWNER_USERNAME = 'Salim';
@@ -78,6 +85,7 @@ export interface AiAssistantMessage {
   draftId?: string | null;
   pendingActionId?: string | null;
   navigation?: AiNavigationDirective | null;
+  createdAccounts?: CreatedUserCredential[] | null;
   timestamp: number;
 }
 
@@ -187,10 +195,119 @@ export async function verifyMainOwnerLive(authUser: AuthUser | undefined, verifi
   return { ok: true, status: 200 };
 }
 
+export class GeminiRateLimitError extends Error {
+  status = 429;
+  code = 'GEMINI_RATE_LIMIT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'GeminiRateLimitError';
+  }
+}
+
+export class GeminiConfigError extends Error {
+  status = 503;
+  code = 'GEMINI_CONFIG_ERROR';
+  constructor(message: string) {
+    super(message);
+    this.name = 'GeminiConfigError';
+  }
+}
+
+function classifyGeminiError(err: unknown): {
+  isRateLimit: boolean;
+  isAuthOrKey: boolean;
+  isNotFound: boolean;
+  messageAr: string;
+} {
+  const anyErr = err as any;
+  const status = Number(anyErr?.status || anyErr?.code || anyErr?.error?.code || 0);
+  const statusText = String(anyErr?.statusText || anyErr?.error?.status || '').toUpperCase();
+  const rawMsg = err instanceof Error ? err.message : String(err || '');
+  const combined = `${status} ${statusText} ${rawMsg}`.toLowerCase();
+
+  const isRateLimit =
+    status === 429 ||
+    combined.includes('429') ||
+    combined.includes('resource_exhausted') ||
+    combined.includes('rate limit') ||
+    combined.includes('too many requests') ||
+    combined.includes('quota');
+
+  if (isRateLimit) {
+    return {
+      isRateLimit: true,
+      isAuthOrKey: false,
+      isNotFound: false,
+      messageAr:
+        'تم بلوغ الحد المؤقت لطلبات Gemini API (خطأ 429 / نفاد الحصة). يرجى الانتظار قليلاً قبل إعادة المحاولة للتوليد الإبداعي، مع العلم أن جميع الأوامر الإدارية المباشرة (إنشاء الحسابات، إدارة المستخدمين، استعراض القنوات، قراءة الرسائل، واعتماد المسودات) تعمل مباشرة عبر الخادم بدون استهلاك Gemini.',
+    };
+  }
+
+  const isAuthOrKey =
+    status === 401 ||
+    status === 403 ||
+    combined.includes('permission_denied') ||
+    combined.includes('api_key_invalid') ||
+    combined.includes('gemini_api_key');
+
+  if (isAuthOrKey) {
+    return {
+      isRateLimit: false,
+      isAuthOrKey: true,
+      isNotFound: false,
+      messageAr:
+        'تعذر الاتصال بـ Gemini API بسبب مفتاح API غير مهيأ أو غير صالح في Settings > Secrets. الأوامر الإدارية المباشرة على الخادم ما زالت تعمل بشكل طبيعي.',
+    };
+  }
+
+  const isNotFound = status === 404 || combined.includes('not_found');
+  if (isNotFound) {
+    return {
+      isRateLimit: false,
+      isAuthOrKey: false,
+      isNotFound: true,
+      messageAr: `النموذج المطلوب (${GEMINI_MODEL}) غير متاح حالياً في Gemini API.`,
+    };
+  }
+
+  return {
+    isRateLimit: false,
+    isAuthOrKey: false,
+    isNotFound: false,
+    messageAr: rawMsg || 'تعذر إتمام الطلب عبر Gemini API.',
+  };
+}
+
+async function callGeminiWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const info = classifyGeminiError(err);
+    if (info.isRateLimit) {
+      await new Promise((r) => setTimeout(r, 1100 + crypto.randomInt(0, 350)));
+      try {
+        return await fn();
+      } catch (retryErr) {
+        const retryInfo = classifyGeminiError(retryErr);
+        if (retryInfo.isRateLimit) {
+          throw new GeminiRateLimitError(retryInfo.messageAr);
+        }
+        throw new Error(retryInfo.messageAr);
+      }
+    }
+    if (info.isAuthOrKey) {
+      throw new GeminiConfigError(info.messageAr);
+    }
+    throw new Error(info.messageAr);
+  }
+}
+
 function getGeminiClient(): GoogleGenAI {
   const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) {
-    throw new Error('مفتاح GEMINI_API_KEY غير مهيأ على الخادم في Settings > Secrets.');
+    throw new GeminiConfigError(
+      'مفتاح GEMINI_API_KEY غير مهيأ في Settings > Secrets. الأوامر الإدارية المباشرة تعمل بدون Gemini.'
+    );
   }
   return new GoogleGenAI({
     apiKey,
@@ -373,6 +490,7 @@ async function appendChatMessage(msg: Omit<AiAssistantMessage, 'id' | 'threadId'
     draftId: msg.draftId ?? null,
     pendingActionId: msg.pendingActionId ?? null,
     navigation: msg.navigation ?? null,
+    createdAccounts: msg.createdAccounts && msg.createdAccounts.length > 0 ? msg.createdAccounts : null,
     timestamp: msg.timestamp || Date.now(),
   };
   store.messages!.push(full);
@@ -497,46 +615,49 @@ async function generateDiverseVirtualPersonas(params: {
   const forbiddenNames = Array.from(realNamesSet).slice(0, 60).join('، ');
 
   const prompt = `
-أنت محرك توليد تفاعلات واقعية ومتنوعة لشخصيات يمنية في مجتمع تداول يديره القائد «سليم» (Salim).
+أنت محرك توليد تفاعلات وحوارات واقعية ومتنوعة لشخصيات يمنية في مجتمع تداول يديره القائد «سليم» (Salim).
 المطلوب: إعداد بالضبط ${safeCount} شخصيات يمنية افتراضية مختلفة، ولكل شخصية رسالة واحدة فريدة موجهة للقناة «${params.channelName}» حول الموضوع التالي:
 "${params.topic}"
 ${sampleBlock}
 
-شروط صارمة للتنوع والأصالة اليمنية (لا تخالف أياً منها):
+شروط صارمة للتنوع والأصالة اليمنية والحوار الطبيعي (لا تخالف أياً منها):
 1. الأسماء اليمنية: اختر ${safeCount} أسماء يمنية واقعية ومتنوعة (ثنائية أو كُنى/ألقاب يمنية مألوفة ذكوراً وإناثاً مثل: أبو حمير، قاسم الحميري، بلقيس اليافعي، عبده القدسي، وضاح الأغبري، أروى الصنعاني، ماهر العولقي، سمية الحضرمي، غمدان المقطري، نشوان السقاف، سوسن العدني، مختار الذماري، نبيل الإرياني، أمل الكميم، صقر الشبواني، طه الشرجبي، رضوان التهامي، هدى البيضاني). يُمنع تماماً استخدام أي اسم متكرر، ويُمنع استخدام الأسماء الحقيقية التالية الموجودة في التطبيق: ${forbiddenNames || 'لا يوجد'}.
 2. تنوع اللهجات والأساليب اليمنية: اجعل جميع الشخصيات تتحدث بروح يمنية أصيلة ووزّع الرسائل بين اللهجات والأساليب اليمنية المتنوعة:
-   - صنعاني (مثل: ما شاء الله تبارك الله، الله يفتح عليك، سلمت يمناك، حيّا الله القائد، ربنا يبارك في رزقك)
-   - عدني (مثل: يا سلام عليك، والله شغل فنان، ربنا يوفقنا جميعاً، تسلم يا غالي، تمام التمام)
-   - تعزي / إبّي (مثل: ما شاء الله تبارك الرحمن، كفو يا سليم، الله يزيدك من فضله، خطوة قوية ومرتبة)
+   - صنعاني (مثل: ما شاء الله تبارك الله، الله يفتح عليك، سلمت يمناك، حيّا الله القائد، ربنا يبارك في رزقك، شغلك مرتب)
+   - عدني (مثل: يا سلام عليك، والله شغل فنان، ربنا يوفقنا جميعاً، تسلم يا غالي، تمام التمام، ما قصرت يا كابتن)
+   - تعزي / إبّي (مثل: ما شاء الله تبارك الرحمن، كفو يا سليم، الله يزيدك من فضله، خطوة قوية ومرتبة، بيّض الله وجهك)
    - حضرمي / شبواني / يافعي (مثل: بارك الله فيك، الله يرزقنا وإياكم الخير، تحليل طيب ومبارك، ما قصرت يا أبو سليم)
-   - فصحى طبيعية بروح يمنية ودعاء صادق
-   يُمنع استخدام لهجات غير يمنية (لا تستخدم مصري أو شامي أو عراقي).
-3. تفاوت الطول والتركيب: اجعل بعض الرسائل قصيرة جداً (3-6 كلمات) وبعضها متوسطة (7-14 كلمة) وبعضها بجملتين قصيرتين (15-24 كلمة). نوّع في علامات الترقيم والإيموجي (بعضها بدون إيموجي، بعضها بإيموجي خفيف واحد أو اثنين، ولا تكرر نفس الشكل في الكل).
-4. منع النسخ والتكرار: ممنوع تكرار نفس العبارة الافتتاحية أو الخاتمة عبر أكثر من رسالة (مثلاً لا تبدأ كل الرسائل بـ "شكراً سليم"). اجعل كل رسالة تبدو من شخص يمني مختلف فعلاً.
-5. يُمنع تماماً كتابة أي عبارة تشير إلى الذكاء الاصطناعي أو التوليد الآلي مثل "مولّد بالذكاء الاصطناعي" أو أي وسوم نظامية.
-6. التزم بتفاصيل الموضوع "${params.topic}" بصدق دون اختلاق أرقام لم ترد فيه.
+   - فصحى طبيعية خفيفة بروح يمنية ودعاء صادق
+   يُمنع استخدام لهجات غير يمنية (لا تستخدم مصري أو شامي أو عراقي أو خليجي مصطنع).
+3. الترابط والحوار الحي بين الشخصيات: عندما يكون العدد 2 فأكثر، اجعل الرسائل تبدو كنقاش وتفاعل طبيعي مترابط داخل القناة وليس جملاً منفصلة مكررة؛ بحيث تتفاعل الأولى مع الموضوع أو سياق القناة، وتتجاوب الشخصيات التالية مع الموضوع أو تبني على كلام من قبلها بعفوية (مثل: إبداء الإعجاب بزاوية معينة، طرح سؤال سريع طبيعي، أو تأكيد نقطة واقعية بأسلوب يمني مختلف).
+4. تفاوت الطول والتركيب: اجعل بعض الرسائل قصيرة جداً (3-6 كلمات) وبعضها متوسطة (7-14 كلمة) وبعضها بجملتين قصيرتين (15-24 كلمة). نوّع في علامات الترقيم والإيموجي (بعضها بدون إيموجي، بعضها بإيموجي خفيف واحد أو اثنين، ولا تكرر نفس الشكل في الكل).
+5. منع النسخ والتكرار والعبارات الجاهزة: ممنوع تكرار نفس العبارة الافتتاحية أو الخاتمة عبر أكثر من رسالة (مثلاً لا تبدأ كل الرسائل بـ "شكراً سليم" أو "ما شاء الله"). اجعل كل رسالة تبدو من شخص يمني مختلف فعلاً.
+6. يُمنع تماماً كتابة أي عبارة تشير إلى الذكاء الاصطناعي أو التوليد الآلي مثل "مولّد بالذكاء الاصطناعي" أو أي وسوم نظامية.
+7. التزم بتفاصيل الموضوع "${params.topic}" بصدق دون اختلاق أرقام لم ترد فيه.
 `;
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            personaName: { type: Type.STRING, description: 'الاسم الظاهر للشخصية الافتراضية اليمنية' },
-            dialect: { type: Type.STRING, description: 'اللهجة اليمنية أو الأسلوب مثل: صنعاني، عدني، تعزي، حضرمي، إبّي، يافعي، فصحى يمنية' },
-            styleTag: { type: Type.STRING, description: 'وصف قصير لطول ونبرة الرسالة' },
-            text: { type: Type.STRING, description: 'نص رسالة التفاعل باللهجة أو الروح اليمنية' },
+  const response = await callGeminiWithRetry(() =>
+    ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              personaName: { type: Type.STRING, description: 'الاسم الظاهر للشخصية الافتراضية اليمنية' },
+              dialect: { type: Type.STRING, description: 'اللهجة اليمنية أو الأسلوب مثل: صنعاني، عدني، تعزي، حضرمي، إبّي، يافعي، فصحى يمنية' },
+              styleTag: { type: Type.STRING, description: 'وصف قصير لطول ونبرة الرسالة' },
+              text: { type: Type.STRING, description: 'نص رسالة التفاعل باللهجة أو الروح اليمنية' },
+            },
+            required: ['personaName', 'dialect', 'styleTag', 'text'],
           },
-          required: ['personaName', 'dialect', 'styleTag', 'text'],
         },
       },
-    },
-  });
+    })
+  );
 
   const rawText = (response.text || '[]').trim();
   let parsed: any[] = [];
@@ -834,6 +955,57 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
     },
   },
   {
+    name: 'create_user_accounts',
+    description:
+      'إنشاء حساب مستخدم واحد أو عدة حسابات فعلية في نظام المستخدمين الحالي بصلاحية عضو عادي (role: user) مع توليد أسماء يمنية متنوعة وأسماء مستخدمين إنجليزية فريدة وكلمات مرور عشوائية قوية وعرض بيانات الدخول للمالك.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        count: {
+          type: Type.NUMBER,
+          description: 'عدد الحسابات المطلوب إنشاؤها (من 1 إلى 30).',
+        },
+        customDisplayNames: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'أسماء عرض مخصصة (اختياري؛ إذا تُركت فارغة يتم توليد أسماء يمنية متنوعة تلقائياً).',
+        },
+        customPassword: {
+          type: Type.STRING,
+          description: 'كلمة مرور محددة عند إنشاء حساب واحد فقط (اختياري).',
+        },
+      },
+      required: ['count'],
+    },
+  },
+  {
+    name: 'update_user_account',
+    description:
+      'تعديل بيانات مستخدم عادي في النظام مباشرة (الاسم الظاهر، كلمة المرور، إعادة تعيين كلمة مرور عشوائية، أو عدد الإنذارات) دون المساس بحساب المالك.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        userQuery: { type: Type.STRING, description: 'اسم المستخدم أو المعرف أو الاسم الظاهر.' },
+        displayName: { type: Type.STRING, description: 'الاسم الظاهر الجديد (اختياري).' },
+        password: { type: Type.STRING, description: 'كلمة المرور الجديدة (اختياري).' },
+        generateRandomPassword: { type: Type.BOOLEAN, description: 'إن true يولّد كلمة مرور عشوائية قوية جديدة.' },
+        warningsCount: { type: Type.NUMBER, description: 'عدد الإنذارات الجديد (اختياري).' },
+      },
+      required: ['userQuery'],
+    },
+  },
+  {
+    name: 'delete_user_account',
+    description: 'حذف حساب مستخدم عادي (غير المالك) من النظام مباشرة.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        userQuery: { type: Type.STRING, description: 'اسم المستخدم الدقيق أو المعرف الرقمي.' },
+      },
+      required: ['userQuery'],
+    },
+  },
+  {
     name: 'get_audit_logs',
     description: 'جلب آخر سجلات التدقيق لعمليات المساعد الذكي.',
     parameters: {
@@ -858,22 +1030,26 @@ function buildSystemInstruction(thread: AiAssistantThread, openDraft: AiAssistan
       : 'لا يوجد إجراء إداري معلق حالياً.',
   ].join('\n');
 
-  return `أنت «المساعد الذكي» الشخصي والإداري الحصري لحساب المالك الرئيسي "سليم" (Salim) داخل تطبيق Salim لتحديات التداول وإدارة القنوات.
+  return `أنت «المساعد الذكي» التنفيذي والإداري الحصري لحساب المالك الرئيسي "سليم" (Salim) داخل تطبيق Salim لتحديات التداول وإدارة القنوات.
 
 قواعد السلوك والتنفيذ:
 1. خاطب المالك سليم مباشرة بالعربية الطبيعية الواضحة والمهذبة والعملية، وافهم اللهجات والطلبات غير الرسمية.
-2. نفّذ المهام فعلياً باستخدام الأدوات المتاحة بدلاً من مجرد شرح الطريقة للمستخدم. بعد تنفيذ أي أداة، اشرح بوضوح ودقة النتيجة الفعلية التي تمت.
-3. التزم بالسياق النشط: إذا انتقل المالك لقناة أو قسم في رسالة سابقة ثم قال في رسالة لاحقة "أنشئ تفاعلات" أو "اقرأ الرسائل"، استخدم القناة النشطة في السياق.
-4. الشخصيات الافتراضية والتفاعلات (حماية المراجعة والشفافية):
+2. نفّذ المهام فعلياً باستخدام الأدوات المتاحة بدلاً من مجرد شرح الطريقة للمستخدم. بعد تنفيذ أي أداة، اعرض بوضوح ودقة النتيجة الفعلية التي تمت.
+3. إنشاء وإدارة حسابات المستخدمين في النظام الحالي:
+   - عند طلب إنشاء حساب مستخدم أو عدة حسابات، استدعِ الأداة create_user_accounts فوراً (تُنشأ جميع الحسابات بصلاحية عضو عادي user فقط وبأسماء يمنية متنوعة وأسماء مستخدمين إنجليزية فريدة وكلمات مرور عشوائية قوية).
+   - اعرض للمالك تفاصيل الحسابات وبيانات الدخول التي أرجعتها الأداة بوضوح.
+   - عند طلب تعديل بيانات مستخدم عادي أو حذف حساب غير محمي، يمكنك استخدام update_user_account أو delete_user_account مباشرة.
+4. التزم بالسياق النشط: إذا انتقل المالك لقناة أو قسم في رسالة سابقة ثم قال في رسالة لاحقة "أنشئ تفاعلات" أو "اقرأ الرسائل"، استخدم القناة النشطة في السياق.
+5. الشخصيات الافتراضية والتفاعلات (حماية المراجعة والشفافية):
    - عند طلب إنشاء تفاعلات أو رسائل متعددة من شخصيات افتراضية، استدعِ الأداة prepare_virtual_persona_interactions لإعداد مسودة بشخصيات يمنية متنوعة وعرضها على المالك سليم للمراجعة والاعتماد أولاً.
    - إذا حدد المالك وقتاً أو فاصلاً زمنياً بين كل رسالة وأخرى (مثل: "كل 30 ثانية" أو "كل دقيقة")، مرّر قيمة intervalSeconds بالثواني إلى prepare_virtual_persona_interactions أو confirm_pending.
    - لا تنشر التفاعلات تلقائياً قبل مراجعة المالك وموافقته.
    - في هذا التطبيق تُميَّز الشخصيات الافتراضية بشفافية على أنها «شخصية افتراضية»، ولا تُقدَّم تفاعلاتها كشهادات حقيقية لأعضاء مستقلين.
    - يُمنع منعاً باتاً كتابة عبارة "مولّد بالذكاء الاصطناعي" أو ترديدها.
-5. الإجراءات الإدارية والحساسة (إرسال رسالة قناة/خاصة، إنشاء/تعديل/حذف قناة، إضافة/إزالة عضو، تغيير دور أو حذف مستخدم، تثبيت رسالة):
+6. الإجراءات الإدارية للقنوات والرسائل الحساسة (إرسال رسالة قناة/خاصة، إنشاء/تعديل/حذف قناة، إضافة/إزالة عضو، تغيير رتبة مشرف، تثبيت رسالة):
    - استخدم أداة propose_* المناسبة لتجهيز الإجراء وعرض ملخصه الواضح للمالك بانتظار تأكيده الصريح.
    - عندما يرد المالك في رسالة لاحقة بالموافقة الصريحة (مثل: "انشرها"، "اعتمد"، "نعم نفذ"، "موافق") أو الإلغاء، استدعِ confirm_pending.
-6. كن أميناً ودقيقاً: لا تخترع رسائل أو أسماء أو أرقام غير موجودة في نتائج الأدوات، وإذا تعذر تنفيذ شيء اذكر السبب الفعلي مباشرة.
+7. كن أميناً ودقيقاً: لا تخترع رسائل أو أسماء أو أرقام غير موجودة في نتائج الأدوات، وإذا تعذر تنفيذ شيء اذكر السبب الفعلي مباشرة.
 
 السياق الحالي:
 ${ctxSummary}`;
@@ -1503,20 +1679,874 @@ function getLatestPending(turnStartedAt: number): { draft: AiAssistantDraft | nu
   return { draft: drafts[0] || null, action: actions[0] || null };
 }
 
+function toAsciiDigits(s: string): string {
+  return String(s || '').replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+}
+
+function parseArabicCount(text: string): number | null {
+  const ascii = toAsciiDigits(text);
+  const digitMatch = ascii.match(/\b(\d{1,2})\b/);
+  if (digitMatch) {
+    const n = Number(digitMatch[1]);
+    if (n >= 1 && n <= 30) return n;
+  }
+  const norm = normalizeArabicForMatch(ascii);
+  if (/(?:حسابين|مستخدمين اثنين|عضوين|شخصيتين|تفاعلين|رسالتين)/.test(norm)) return 2;
+  const wordsMap: Array<[RegExp, number]> = [
+    [/\bثلاثين\b/, 30],
+    [/\bعشرين\b/, 20],
+    [/\bخمسه عشر\b|\bخمسطعش\b/, 15],
+    [/\bاثنا عشر\b|\bاثني عشر\b|\bاطنعش\b/, 12],
+    [/\bعشره\b|\bعشر\b/, 10],
+    [/\bتسعه\b|\bتسع\b/, 9],
+    [/\bثمانيه\b|\bثماني\b|\bثمان\b/, 8],
+    [/\bسبعه\b|\bسبع\b/, 7],
+    [/\bسته\b|\bست\b/, 6],
+    [/\bخمسه\b|\bخمس\b/, 5],
+    [/\bاربعه\b|\bاربع\b/, 4],
+    [/\bثلاثه\b|\bثلاث\b/, 3],
+    [/\bاثنين\b|\bاثنان\b/, 2],
+    [/\bواحد\b|\bواحده\b/, 1],
+  ];
+  for (const [re, num] of wordsMap) {
+    if (re.test(norm)) return num;
+  }
+  return null;
+}
+
+function parseIntervalSecondsFromArabic(text: string): number | undefined {
+  const ascii = toAsciiDigits(text);
+  const norm = normalizeArabicForMatch(ascii);
+  if (/(?:فورا|دفعه واحده|بدون انتظار|بدون فاصل)/.test(norm)) return 0;
+  const secMatch = norm.match(/كل\s*(\d+)\s*(?:ثانيه|ثواني|ث)\b/);
+  if (secMatch) return clampIntervalSeconds(Number(secMatch[1]));
+  const minNumMatch = norm.match(/كل\s*(\d+)\s*(?:دقيقه|دقائق|د)\b/);
+  if (minNumMatch) return clampIntervalSeconds(Number(minNumMatch[1]) * 60);
+  if (/كل\s*(?:دقيقتين)\b/.test(norm)) return 120;
+  if (/كل\s*(?:دقيقه|دقيقه واحده)\b/.test(norm)) return 60;
+  if (/كل\s*(?:نصف دقيقه|نص دقيقه)\b/.test(norm)) return 30;
+  return undefined;
+}
+
+function mapArabicSectionTarget(raw: string): AiNavigationDirective['tab'] | null {
+  const norm = normalizeArabicForMatch(raw);
+  if (/(?:لوحه الاداره|الاداره|قسم الاداره|اداره المستخدمين|اداره القنوات)/.test(norm)) return 'admin';
+  if (/(?:الرئيسيه|الداشبورد|لوحه التحكم|الصفحه الرئيسيه)/.test(norm)) return 'dashboard';
+  if (/(?:المحادثات الخاصه|الخاص|الرسائل الخاصه)/.test(norm)) return 'private_chat';
+  if (/(?:السجل|التاريخ|سجل الصفقات)/.test(norm)) return 'history';
+  if (/(?:خريطه الطريق|خطه الطريق|المحطات|التحدي)/.test(norm)) return 'roadmap';
+  if (/(?:الاعدادات|الضبط)/.test(norm)) return 'settings';
+  if (/(?:القنوات|قسم القنوات)/.test(norm)) return 'channels';
+  return null;
+}
+
+async function resolveUserCandidatesForDirect(query: string) {
+  const clean = String(query || '').trim().replace(/^#/, '').replace(/^@/, '');
+  const all = await getAllUsersList();
+  if (!clean) return [];
+  if (/^\d+$/.test(clean)) {
+    const idNum = Number(clean);
+    return all.filter((u) => Number(u.id) === idNum);
+  }
+  const norm = normalizeArabicForMatch(clean);
+  const exact = all.filter(
+    (u) => normalizeArabicForMatch(u.username) === norm || normalizeArabicForMatch(u.displayName) === norm
+  );
+  if (exact.length > 0) return exact;
+  return all.filter(
+    (u) => normalizeArabicForMatch(u.username).includes(norm) || normalizeArabicForMatch(u.displayName).includes(norm)
+  );
+}
+
+type DirectChatResult = {
+  userMessage: AiAssistantMessage;
+  assistantMessage: AiAssistantMessage;
+  thread: AiAssistantThread;
+  activeDraft: AiAssistantDraft | null;
+  activePendingAction: AiAssistantPendingAction | null;
+  createdAccounts?: CreatedUserCredential[];
+  handledByServerDirect: true;
+};
+
+async function finalizeDirectReply(params: {
+  cleanInput: string;
+  turnStartedAt: number;
+  replyText: string;
+  toolSteps: AiToolStep[];
+  thread: AiAssistantThread;
+  draftId?: string | null;
+  pendingActionId?: string | null;
+  navigation?: AiNavigationDirective | null;
+  createdAccounts?: CreatedUserCredential[];
+}): Promise<DirectChatResult> {
+  const store = getAiAssistantDiskStore();
+  const userMessage = await appendChatMessage({
+    role: 'user',
+    text: params.cleanInput,
+    timestamp: params.turnStartedAt,
+  });
+  const assistantMessage = await appendChatMessage({
+    role: 'assistant',
+    text: params.replyText,
+    toolSteps: params.toolSteps.length > 0 ? params.toolSteps : null,
+    draftId: params.draftId ?? null,
+    pendingActionId: params.pendingActionId ?? null,
+    navigation: params.navigation ?? null,
+    createdAccounts: params.createdAccounts,
+    timestamp: Date.now(),
+  });
+  const activeDraft = params.draftId ? (store.drafts?.[params.draftId] as AiAssistantDraft) || null : null;
+  const activePendingAction = params.pendingActionId
+    ? (store.pendingActions?.[params.pendingActionId] as AiAssistantPendingAction) || null
+    : null;
+  return {
+    userMessage,
+    assistantMessage,
+    thread: params.thread,
+    activeDraft,
+    activePendingAction,
+    ...(params.createdAccounts && params.createdAccounts.length > 0 ? { createdAccounts: params.createdAccounts } : {}),
+    handledByServerDirect: true,
+  };
+}
+
+async function tryExecuteDirectArabicCommand(cleanInput: string, turnStartedAt: number): Promise<DirectChatResult | null> {
+  const store = getAiAssistantDiskStore();
+  let thread = ensureThread();
+  const prePending = getLatestPending(turnStartedAt);
+  const asciiInput = toAsciiDigits(cleanInput).trim();
+  const norm = normalizeArabicForMatch(asciiInput);
+  const wordsCount = norm.split(/\s+/).filter(Boolean).length;
+
+  // A. Approve or cancel pending draft/action directly (0 Gemini calls)
+  if (prePending.draft || prePending.action) {
+    const isCancelPhrase =
+      wordsCount <= 6 &&
+      /^(?:الغ|ألغ|الغاء|الغي|رفض|توقف|لا تنشر|لا تنفذ|كنسل)(?:\s+(?:المسوده|الاجراء|العمليه|الكل))?[!؟.]*$/.test(norm);
+    const strippedInterval = norm
+      .replace(/كل\s*\d+\s*(?:ثانيه|ثواني|ث|دقيقه|دقائق|د)/g, '')
+      .replace(/كل\s*(?:دقيقتين|دقيقه|نصف دقيقه|نص دقيقه)/g, '')
+      .replace(/(?:فورا|دفعه واحده|الان)/g, '')
+      .trim();
+    const isApprovePhrase =
+      strippedInterval.split(/\s+/).filter(Boolean).length <= 5 &&
+      /^(?:اعتمد|اعتماد|موافق|اوافق|نعم|انشرها|انشر|ابدا النشر|نفذ|تاكيد|اكد|تمام)(?:\s+(?:المسوده|الاجراء|العمليه|التفاعلات|النشر|ونفذ|وانشر))?[!؟.]*$/.test(
+        strippedInterval
+      );
+
+    if (isCancelPhrase) {
+      if (prePending.draft) {
+        const cancelled = await cancelDraft(prePending.draft.id);
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          replyText: `تم إلغاء مسودة التفاعلات (${cancelled.items.length} تفاعلات) لقناة «${cancelled.channelName}» بناءً على أمرك.`,
+          toolSteps: [
+            {
+              toolName: 'confirm_pending',
+              labelAr: 'إلغاء المسودة المعلقة',
+              status: 'ok',
+              summaryAr: `تم إلغاء ${cancelled.items.length} تفاعلات.`,
+            },
+          ],
+        });
+      }
+      if (prePending.action) {
+        const cancelled = await cancelPendingAction(prePending.action.id);
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          replyText: `تم إلغاء الإجراء المعلق: ${cancelled.titleAr}.`,
+          toolSteps: [
+            {
+              toolName: 'confirm_pending',
+              labelAr: 'إلغاء الإجراء المعلق',
+              status: 'ok',
+              summaryAr: cancelled.titleAr,
+            },
+          ],
+        });
+      }
+    }
+
+    if (isApprovePhrase) {
+      if (prePending.draft) {
+        const intervalOverride = parseIntervalSecondsFromArabic(asciiInput);
+        const res = await approveAndPublishDraft(prePending.draft.id, cleanInput, intervalOverride);
+        const usedInterval = res.draft.intervalSeconds || 0;
+        const nav: AiNavigationDirective = {
+          tab: 'channels',
+          channelId: res.draft.channelId,
+          channelName: res.draft.channelName,
+          messageId: res.publishedMessages[res.publishedMessages.length - 1]?.id || null,
+        };
+        const replyText = res.scheduled
+          ? `تم اعتماد المسودة وبدء النشر المجدول في قناة «${res.draft.channelName}»: أُرسلت الرسالة الأولى الآن، وسيُرسل باقي الـ ${res.draft.items.length} تفاعلات تلقائياً كل ${usedInterval} ثانية.`
+          : `تم اعتماد ونشر ${res.publishedMessages.length} تفاعلات مباشرة في قناة «${res.draft.channelName}».`;
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          navigation: nav,
+          replyText,
+          toolSteps: [
+            {
+              toolName: 'confirm_pending',
+              labelAr: res.scheduled ? `بدء النشر المجدول (${res.draft.items.length})` : `نشر ${res.publishedMessages.length} تفاعلات`,
+              status: 'ok',
+              summaryAr: res.scheduled ? `كل ${usedInterval} ثانية في «${res.draft.channelName}»` : `تم النشر في «${res.draft.channelName}»`,
+            },
+          ],
+        });
+      }
+      if (prePending.action) {
+        const res = await confirmPendingAction(prePending.action.id, cleanInput);
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          navigation: res.navigation || null,
+          replyText: res.action.resultMessage || `تم تنفيذ الإجراء: ${res.action.titleAr}.`,
+          toolSteps: [
+            {
+              toolName: 'confirm_pending',
+              labelAr: res.action.titleAr,
+              status: 'ok',
+              summaryAr: res.action.resultMessage || 'تم التنفيذ بنجاح.',
+            },
+          ],
+        });
+      }
+    }
+  }
+
+  // B. Direct User Account Creation (0 Gemini calls, strict role: 'user')
+  const hasUserCreateVerb = /(?:انشئ|انشاء|سجل|تسجيل|اضف|اضافه|اعمل|سو|سوي|افتح|ولد|توليد|كون|جهز)/.test(norm);
+  const hasUserAccountNoun = /(?:حساب|حسابات|حسابين|مستخدم|مستخدمين|مستخدمون|عضو|اعضاء|عضوين)/.test(norm);
+  const mentionsChannelOrInteraction = /(?:قناه|قناة|تفاعل|تفاعلات|تفاعلين|شخصيات افتراضيه|تعليق|تعليقات)/.test(norm);
+  if (hasUserCreateVerb && hasUserAccountNoun && !mentionsChannelOrInteraction) {
+    let customDisplayNames: string[] | undefined;
+    let customPassword: string | undefined;
+
+    const passMatch = asciiInput.match(/(?:بكلمة مرور|بكلمه مرور|كلمة المرور|كلمه المرور|باسورد)\s+([^\s،,]+)/i);
+    if (passMatch) {
+      customPassword = passMatch[1].trim();
+    }
+
+    const multiNamesMatch = asciiInput.match(/(?:بأسماء|باسماء)\s+(?!يمني)(.+)$/i);
+    if (multiNamesMatch) {
+      const candidateNames = multiNamesMatch[1]
+        .replace(/(?:بكلمة مرور|بكلمه مرور|كلمة المرور|كلمه المرور|باسورد).*$/i, '')
+        .split(/[،,\n]+/)
+        .map((x) => x.trim())
+        .filter((x) => x.length >= 2 && !/^(?:يمنية|يمنيه|مختلفة|مختلفه|عشوائية|عشوائيه)$/i.test(x));
+      if (candidateNames.length > 0) {
+        customDisplayNames = candidateNames;
+      }
+    } else {
+      const singleNameMatch = asciiInput.match(/(?:باسم|اسمه)\s+(.+)$/i);
+      if (singleNameMatch) {
+        const cleanedName = singleNameMatch[1]
+          .replace(/(?:بكلمة مرور|بكلمه مرور|كلمة المرور|كلمه المرور|باسورد).*$/i, '')
+          .replace(/(?:بصلاحية|بصلاحيه|كعضو|عضو عادي).*$/i, '')
+          .trim();
+        if (cleanedName && !/^(?:يمني|يمنية|يمنيه|عشوائي)$/i.test(cleanedName)) {
+          customDisplayNames = [cleanedName];
+        }
+      }
+    }
+
+    const explicitCount = parseArabicCount(asciiInput);
+    const isPluralAccountWord = /(?:حسابات|مستخدمين|مستخدمون|اعضاء)/.test(norm);
+    const count = explicitCount ?? (customDisplayNames ? customDisplayNames.length : isPluralAccountWord ? 3 : 1);
+
+    const { created, failed } = await createUsersBatchViaAssistant({
+      count,
+      customDisplayNames,
+      customPassword,
+    });
+
+    if (created.length === 0) {
+      const errDetail = failed[0]?.error || 'تعذر إنشاء الحسابات المطلوبة.';
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `لم يتم إنشاء أي حساب: ${errDetail}`,
+        toolSteps: [
+          {
+            toolName: 'create_user_accounts',
+            labelAr: 'إنشاء حسابات مستخدمين',
+            status: 'error',
+            summaryAr: errDetail,
+          },
+        ],
+      });
+    }
+
+    await appendAuditLog({
+      actionType: 'create_user_accounts',
+      command: cleanInput,
+      target: created.map((u) => `@${u.username} (#${u.id})`).join(', '),
+      status: 'success',
+      details: `تم إنشاء ${created.length} حساب مستخدم بصلاحية user مباشرة عبر الخادم (بدون استهلاك Gemini).`,
+    });
+
+    const lines = created.map(
+      (u, idx) =>
+        `${idx + 1}. ${u.displayName} — اسم المستخدم: @${u.username} | كلمة المرور: ${u.password} | الصلاحية: ${u.role} (#${u.id})`
+    );
+    const replyText = [
+      `تم تنفيذ العملية مباشرة على الخادم وإنشاء ${created.length} ${created.length === 1 ? 'حساب مستخدم' : 'حسابات مستخدمين'} بصلاحية عضو عادي (user):`,
+      '',
+      ...lines,
+      ...(failed.length > 0 ? ['', `تنبيه: تعذر إنشاء ${failed.length} حساب (${failed.map((f) => f.error).join('، ')}).`] : []),
+      '',
+      'الحسابات مسجلة الآن في نظام المستخدمين ويمكن الدخول بها فوراً أو مراجعتها من لوحة الإدارة.',
+    ].join('\n');
+
+    return finalizeDirectReply({
+      cleanInput,
+      turnStartedAt,
+      thread,
+      replyText,
+      createdAccounts: created,
+      navigation: { tab: 'admin' },
+      toolSteps: [
+        {
+          toolName: 'create_user_accounts',
+          labelAr: `إنشاء ${created.length} حسابات (user)`,
+          status: 'ok',
+          summaryAr: `تم تسجيل ${created.length} حساب فعلي في النظام مباشرة.`,
+        },
+      ],
+    });
+  }
+
+  // C. Direct List / Search Users (0 Gemini calls)
+  const isListUsersCmd =
+    /^(?:(?:اعرض|عرض|هات|اظهر|اعطني)\s+)?(?:كل\s+|جميع\s+|اسماء\s+|قائمه\s+|جدول\s+|بيانات\s+)*?(?:المستخدمين|الاعضاء|الحسابات)(?:\s+المسجلين)?[!؟.]*$/.test(norm) ||
+    /^كم عدد\s+(?:المستخدمين|الاعضاء|الحسابات)[!؟.]*$/.test(norm) ||
+    /^(?:ابحث عن|بحث عن|بيانات|معلومات)\s+(?:المستخدم|الحساب|العضو)\s+(.+)$/.test(norm);
+  if (isListUsersCmd) {
+    const searchMatch = asciiInput.match(/(?:ابحث عن|بحث عن|بيانات|معلومات)\s+(?:المستخدم|الحساب|العضو)\s+(.+)$/i);
+    const searchQ = searchMatch ? normalizeArabicForMatch(searchMatch[1].replace(/^[@#]/, '')) : '';
+    const allUsers = await getAllUsersList();
+    const filtered = searchQ
+      ? allUsers.filter(
+          (u) =>
+            String(u.id) === searchQ ||
+            normalizeArabicForMatch(u.username).includes(searchQ) ||
+            normalizeArabicForMatch(u.displayName).includes(searchQ)
+        )
+      : allUsers;
+
+    const preview = filtered.slice(0, 30);
+    const rows = preview.map(
+      (u) => `• #${u.id} — ${u.displayName} (@${u.username}) | الرتبة: ${u.role}${u.warningsCount ? ` | الإنذارات: ${u.warningsCount}` : ''}`
+    );
+    const replyText =
+      filtered.length === 0
+        ? 'لم يتم العثور على مستخدمين مطابقين لبحثك.'
+        : [
+            searchQ ? `نتائج البحث في المستخدمين (${filtered.length}):` : `إجمالي المستخدمين المسجلين في النظام: ${filtered.length} مستخدم`,
+            '',
+            ...rows,
+            ...(filtered.length > 30 ? ['', `... يتم عرض أول 30 مستخدم من أصل ${filtered.length}.`] : []),
+          ].join('\n');
+
+    return finalizeDirectReply({
+      cleanInput,
+      turnStartedAt,
+      thread,
+      replyText,
+      toolSteps: [
+        {
+          toolName: 'list_users',
+          labelAr: 'جلب قائمة المستخدمين',
+          status: 'ok',
+          summaryAr: `تم العثور على ${filtered.length} مستخدم.`,
+        },
+      ],
+    });
+  }
+
+  // D. Direct Update User DisplayName / Password / Warnings (0 Gemini calls)
+  const renameUserMatch = asciiInput.match(
+    /^(?:غي[ّ]?ر|عد[ّ]?ل|تعديل|تغيير|حد[ّ]?ث)\s+(?:الاسم الظاهر|اسم العرض|اسم)\s+(?:(?:للمستخدم|لـ|المستخدم|لحساب|حساب|الحساب|العضو)\s+)?(.+?)\s+(?:الى|إلى|ليصبح)\s+(.+)$/i
+  );
+  if (renameUserMatch) {
+    const targetQuery = renameUserMatch[1].trim();
+    const newDisplayName = renameUserMatch[2].trim();
+    const candidates = await resolveUserCandidatesForDirect(targetQuery);
+    if (candidates.length === 0) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `لم يتم العثور على مستخدم باسم "${targetQuery}".`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تعديل اسم المستخدم', status: 'error', summaryAr: 'المستخدم غير موجود.' }],
+      });
+    }
+    if (candidates.length > 1) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `يوجد أكثر من مستخدم يطابق "${targetQuery}":\n${candidates
+          .slice(0, 8)
+          .map((u) => `• #${u.id} ${u.displayName} (@${u.username})`)
+          .join('\n')}\nيرجى تحديد @username أو #ID بدقة.`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تعديل اسم المستخدم', status: 'error', summaryAr: 'تطابق متعدد.' }],
+      });
+    }
+    const target = candidates[0];
+    try {
+      const updated = await updateRegularUserByAssistant({ userId: target.id, displayName: newDisplayName });
+      await appendAuditLog({
+        actionType: 'update_user_account',
+        command: cleanInput,
+        target: `@${updated.username} (#${updated.id})`,
+        status: 'success',
+        details: `تم تعديل الاسم الظاهر إلى "${updated.displayName}".`,
+      });
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `تم تحديث الاسم الظاهر للحساب @${updated.username} (#${updated.id}) إلى «${updated.displayName}» بنجاح.`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تعديل الاسم الظاهر', status: 'ok', summaryAr: updated.displayName }],
+      });
+    } catch (err: any) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: err?.message || 'تعذر تعديل اسم المستخدم.',
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تعديل الاسم الظاهر', status: 'error', summaryAr: err?.message || 'مرفوض' }],
+      });
+    }
+  }
+
+  const resetPassMatch = asciiInput.match(
+    /^(?:غي[ّ]?ر|عد[ّ]?ل|تعديل|تغيير|[أا]عد تعيين|[إا]عاده تعيين|[إا]عادة تعيين|جد[ّ]?د)\s+(?:كلمة المرور|كلمه المرور|كلمة مرور|كلمه مرور|كلمة السر|كلمه السر|الباسورد)\s+(?:(?:للمستخدم|لـ|المستخدم|لحساب|حساب|الحساب|العضو)\s+)?(.+?)(?:\s+(?:الى|إلى)\s+(\S+))?$/i
+  );
+  if (resetPassMatch) {
+    const targetQuery = resetPassMatch[1].trim();
+    const explicitPass = resetPassMatch[2]?.trim();
+    const candidates = await resolveUserCandidatesForDirect(targetQuery);
+    if (candidates.length === 0) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `لم يتم العثور على مستخدم باسم "${targetQuery}".`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تحديث كلمة المرور', status: 'error', summaryAr: 'المستخدم غير موجود.' }],
+      });
+    }
+    if (candidates.length > 1) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `يوجد أكثر من مستخدم يطابق "${targetQuery}":\n${candidates
+          .slice(0, 8)
+          .map((u) => `• #${u.id} ${u.displayName} (@${u.username})`)
+          .join('\n')}\nيرجى تحديد @username أو #ID بدقة.`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تحديث كلمة المرور', status: 'error', summaryAr: 'تطابق متعدد.' }],
+      });
+    }
+    const target = candidates[0];
+    try {
+      const updated = await updateRegularUserByAssistant({
+        userId: target.id,
+        ...(explicitPass ? { password: explicitPass } : { generateRandomPassword: true }),
+      });
+      await appendAuditLog({
+        actionType: 'update_user_account',
+        command: cleanInput,
+        target: `@${updated.username} (#${updated.id})`,
+        status: 'success',
+        details: 'تم تحديث كلمة مرور المستخدم مباشرة عبر الخادم.',
+      });
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `تم تحديث كلمة مرور الحساب ${updated.displayName} (@${updated.username} #${updated.id}) بنجاح.\nكلمة المرور الجديدة: ${updated.newPassword}`,
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تحديث كلمة المرور', status: 'ok', summaryAr: `@${updated.username}` }],
+      });
+    } catch (err: any) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: err?.message || 'تعذر تحديث كلمة المرور.',
+        toolSteps: [{ toolName: 'update_user_account', labelAr: 'تحديث كلمة المرور', status: 'error', summaryAr: err?.message || 'مرفوض' }],
+      });
+    }
+  }
+
+  const clearWarnMatch = asciiInput.match(
+    /^(?:صف[ّ]?ر|تصفير|امسح|[أا]زل|حذف)\s+(?:انذارات|إنذارات|تحذيرات)\s+(?:(?:للمستخدم|المستخدم|الحساب|حساب|العضو)\s+)?(.+)$/i
+  );
+  if (clearWarnMatch) {
+    const targetQuery = clearWarnMatch[1].trim();
+    const candidates = await resolveUserCandidatesForDirect(targetQuery);
+    if (candidates.length === 1) {
+      try {
+        const updated = await updateRegularUserByAssistant({ userId: candidates[0].id, warningsCount: 0 });
+        await appendAuditLog({
+          actionType: 'update_user_account',
+          command: cleanInput,
+          target: `@${updated.username} (#${updated.id})`,
+          status: 'success',
+          details: 'تم تصفير الإنذارات إلى 0.',
+        });
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          replyText: `تم تصفير إنذارات الحساب ${updated.displayName} (@${updated.username}) بنجاح.`,
+          toolSteps: [{ toolName: 'update_user_account', labelAr: 'تصفير الإنذارات', status: 'ok', summaryAr: `@${updated.username}` }],
+        });
+      } catch (err: any) {
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          replyText: err?.message || 'تعذر تصفير الإنذارات.',
+          toolSteps: [{ toolName: 'update_user_account', labelAr: 'تصفير الإنذارات', status: 'error', summaryAr: err?.message || 'مرفوض' }],
+        });
+      }
+    }
+  }
+
+  // E. Direct Delete Non-Owner User (0 Gemini calls)
+  const deleteUserMatch = asciiInput.match(
+    /^(?:احذف|حذف|امسح|[أا]زل)\s+(?:حساب\s+المستخدم|المستخدم|حساب|الحساب|العضو)\s+(.+)$/i
+  );
+  if (deleteUserMatch && !/(?:قناه|قناة|رساله|رسالة|مسوده|مسودة)/.test(norm)) {
+    const targetQuery = deleteUserMatch[1].trim();
+    const candidates = await resolveUserCandidatesForDirect(targetQuery);
+    if (candidates.length === 0) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `لم يتم العثور على مستخدم يطابق "${targetQuery}".`,
+        toolSteps: [{ toolName: 'delete_user_account', labelAr: 'حذف مستخدم', status: 'error', summaryAr: 'غير موجود.' }],
+      });
+    }
+    if (candidates.length > 1) {
+      if (candidates.every((u) => isProtectedOwnerOrSystemUser(u))) {
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          replyText: `محظور: جميع الحسابات المطابقة لـ "${targetQuery}" هي حسابات مالك/إدارة محمية ولا يمكن حذفها.`,
+          toolSteps: [{ toolName: 'delete_user_account', labelAr: 'حذف مستخدم', status: 'error', summaryAr: 'حساب محمي.' }],
+        });
+      }
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `يوجد عدة مستخدمين يطابقون "${targetQuery}". حدد اسم المستخدم @username أو #ID بدقة:\n${candidates
+          .slice(0, 8)
+          .map((u) => `• #${u.id} ${u.displayName} (@${u.username})`)
+          .join('\n')}`,
+        toolSteps: [{ toolName: 'delete_user_account', labelAr: 'حذف مستخدم', status: 'error', summaryAr: 'تطابق متعدد.' }],
+      });
+    }
+    const target = candidates[0];
+    if (isProtectedOwnerOrSystemUser(target)) {
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `محظور: الحساب ${target.displayName} (@${target.username}) محمي ولا يمكن حذفه.`,
+        toolSteps: [{ toolName: 'delete_user_account', labelAr: 'حذف مستخدم', status: 'error', summaryAr: 'حساب محمي.' }],
+      });
+    }
+    const deleted = await deleteRegularUserByAssistant(target.id);
+    await appendAuditLog({
+      actionType: 'delete_user_account',
+      command: cleanInput,
+      target: `@${deleted.username} (#${deleted.id})`,
+      status: 'success',
+      details: `تم حذف حساب المستخدم ${deleted.displayName} (@${deleted.username}) مباشرة عبر الخادم.`,
+    });
+    return finalizeDirectReply({
+      cleanInput,
+      turnStartedAt,
+      thread,
+      replyText: `تم حذف حساب المستخدم ${deleted.displayName} (@${deleted.username} #${deleted.id}) من النظام بنجاح.`,
+      toolSteps: [{ toolName: 'delete_user_account', labelAr: 'حذف مستخدم', status: 'ok', summaryAr: `@${deleted.username}` }],
+    });
+  }
+
+  // F. Direct List Channels (0 Gemini calls)
+  if (/^(?:(?:اعرض|عرض|هات|اظهر|ما هي|اعطني)\s+)?(?:كل\s+|جميع\s+|قائمه\s+|اسماء\s+)*?(?:القنوات|قنوات التطبيق)(?:\s+المتاحه)?[!؟.]*$/.test(norm) || /^القنوات المتاحه[!؟.]*$/.test(norm)) {
+    const chs = await getChannelsForUser(OWNER_ID, 'owner');
+    const lines = chs.map(
+      (c, idx) =>
+        `${idx + 1}. «${c.name}» (${c.id}) — ${c.isOpenPublic ? 'مفتوحة للجميع' : c.visibility === 'hidden' ? 'مخفية' : 'مغلقة بكلمة مرور'} | الأعضاء: ${
+          c.displayMemberCount ?? (c.memberIds?.length || c.allowedMemberIds?.length || 1)
+        }`
+    );
+    return finalizeDirectReply({
+      cleanInput,
+      turnStartedAt,
+      thread,
+      replyText: chs.length === 0 ? 'لا توجد قنوات حالياً.' : `القنوات المتاحة في التطبيق (${chs.length}):\n\n${lines.join('\n')}`,
+      toolSteps: [{ toolName: 'list_channels', labelAr: 'استعراض القنوات', status: 'ok', summaryAr: `تم جلب ${chs.length} قناة.` }],
+    });
+  }
+
+  // G. Direct Audit Logs (0 Gemini calls)
+  if (/^(?:اعرض|عرض|هات)?\s*(?:سجل العمليات|سجل التدقيق|اخر العمليات)[!؟.]*$/.test(norm)) {
+    const logs = (store.auditLogs || []).slice(0, 12);
+    const replyText =
+      logs.length === 0
+        ? 'لا توجد عمليات مسجلة في سجل التدقيق حتى الآن.'
+        : `آخر ${logs.length} عمليات مسجلة:\n\n${logs
+            .map((l) => `• [${l.status}] ${l.actionType} — ${l.target}\n  ${l.details}`)
+            .join('\n')}`;
+    return finalizeDirectReply({
+      cleanInput,
+      turnStartedAt,
+      thread,
+      replyText,
+      toolSteps: [{ toolName: 'get_audit_logs', labelAr: 'قراءة سجل التدقيق', status: 'ok', summaryAr: `عرض ${logs.length} سجل.` }],
+    });
+  }
+
+  // H. Direct Single-Intent Navigation (0 Gemini calls)
+  const navMatch = norm.match(/^(?:توجه|اذهب|انتقل|افتح|ادخل|روح)\s+(?:(?:الي|علي|ل)\s+)?(.+)$/);
+  const hasSecondaryAction = /(?:وانشئ|واكتب|واقرا|وارسل|وحضر|وجهز|تفاعل|تفاعلات|حساب|مستخدم)/.test(norm);
+  if (navMatch && !hasSecondaryAction) {
+    const targetPhrase = navMatch[1].trim();
+    const matchedSection = mapArabicSectionTarget(targetPhrase);
+    const matchedChannel =
+      matchedSection && matchedSection !== 'channels' ? null : await resolveChannelTarget(targetPhrase, thread);
+    if (matchedChannel || matchedSection) {
+      const nav: AiNavigationDirective = matchedChannel
+        ? { tab: 'channels', channelId: matchedChannel.id, channelName: matchedChannel.name }
+        : { tab: matchedSection! };
+      thread = await updateThreadContext({
+        activeSection: nav.tab,
+        activeChannelId: matchedChannel ? matchedChannel.id : thread.activeChannelId,
+        activeChannelName: matchedChannel ? matchedChannel.name : thread.activeChannelName,
+      });
+      await appendAuditLog({
+        actionType: 'navigate_app',
+        command: cleanInput,
+        target: matchedChannel ? `${matchedChannel.name} (${matchedChannel.id})` : nav.tab,
+        status: 'success',
+        details: `تم التوجيه مباشرة إلى ${matchedChannel ? `قناة ${matchedChannel.name}` : nav.tab}.`,
+      });
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        navigation: nav,
+        replyText: matchedChannel
+          ? `تم تحديث السياق النشط وتوجيهك إلى قناة «${matchedChannel.name}».`
+          : `تم توجيهك إلى قسم «${nav.tab}».`,
+        toolSteps: [
+          {
+            toolName: 'navigate_app',
+            labelAr: matchedChannel ? `التوجه إلى «${matchedChannel.name}»` : `الانتقال إلى ${nav.tab}`,
+            status: 'ok',
+            summaryAr: matchedChannel ? `القناة النشطة: ${matchedChannel.name}` : `القسم: ${nav.tab}`,
+          },
+        ],
+      });
+    }
+  }
+
+  // I. Direct Read Channel Messages (0 Gemini calls)
+  const readMsgsMatch = norm.match(
+    /^(?:اقرا|اعرض|اجلب|جلب|هات)\s+(?:اخر\s+)?(?:(\d+)\s+)?(?:رسائل|رساله|الرسائل)(?:\s+(?:في|من|داخل)\s+(.+))?$/
+  );
+  if (readMsgsMatch && !/(?:وانشئ|تفاعل|تفاعلات)/.test(norm)) {
+    const limit = Math.max(1, Math.min(50, Number(readMsgsMatch[1]) || 10));
+    const chQuery = readMsgsMatch[2]?.trim() || null;
+    const ch = await resolveChannelTarget(chQuery, thread);
+    if (ch) {
+      const msgs = await getChannelMessages(ch.id, limit);
+      thread = await updateThreadContext({ activeChannelId: ch.id, activeChannelName: ch.name });
+      await appendAuditLog({
+        actionType: 'read_channel_messages',
+        command: cleanInput,
+        target: `${ch.name} (${ch.id})`,
+        status: 'success',
+        details: `قراءة آخر ${msgs.length} رسائل مباشرة.`,
+      });
+      const lines = msgs.map(
+        (m, idx) =>
+          `${idx + 1}. ${m.senderName}${m.isVirtualPersona ? ' (شخصية افتراضية)' : ''}: ${
+            m.text || (m.imageUrl ? '[صورة]' : m.audioUrl ? '[رسالة صوتية]' : '[مرفق]')
+          }`
+      );
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText:
+          msgs.length === 0
+            ? `لا توجد رسائل حالياً في قناة «${ch.name}».`
+            : `آخر ${msgs.length} رسائل في قناة «${ch.name}»:\n\n${lines.join('\n')}`,
+        toolSteps: [
+          {
+            toolName: 'read_channel_messages',
+            labelAr: `قراءة رسائل «${ch.name}»`,
+            status: 'ok',
+            summaryAr: `تمت قراءة ${msgs.length} رسالة.`,
+          },
+        ],
+      });
+    }
+  }
+
+  // J. Direct Creative Route for Virtual Persona Interactions (1 Gemini call instead of multi-round tool calls)
+  const hasPersonaOrInteractionNoun = /(?:تفاعل|تفاعلات|تفاعلين|شخصيه افتراضيه|شخصية افتراضية|شخصيات افتراضيه|شخصيات يمنيه|شخصيتين)/.test(
+    norm
+  );
+  const hasAnyOtherAdminVerb = /(?:احذف|عد[ّ]?ل اسم|غي[ّ]?ر اسم|كلمه مرور|اقرا|اقرأ|اعرض المستخدمين|حساب مستخدم|حسابات مستخدمين)/.test(norm);
+  if (hasUserCreateVerb && hasPersonaOrInteractionNoun && !hasAnyOtherAdminVerb) {
+    const count = parseArabicCount(asciiInput);
+    const topicMatch = asciiInput.match(/(?:حول|عن|بخصوص|على)\s+(.+)$/i);
+    if (count && topicMatch && topicMatch[1].trim().length >= 3) {
+      let requestedChannelQuery: string | null = null;
+      const prefixNavMatch = asciiInput.match(/(?:توج[ّ]?ه|اذهب|انتقل)\s+(?:الى|إلى)\s+(.+?)\s+(?:و|ثم)\s*/i);
+      if (prefixNavMatch) {
+        requestedChannelQuery = prefixNavMatch[1].trim();
+      } else {
+        const inChannelMatch = asciiInput.match(/في\s+(?:قناه|قناة)\s+([^\s]+(?:\s+[^\s]+)?)(?:\s+(?:حول|عن)|$)/i);
+        if (inChannelMatch) {
+          requestedChannelQuery = inChannelMatch[1].trim();
+        }
+      }
+
+      const ch = await resolveChannelTarget(requestedChannelQuery || (!thread.activeChannelId ? 'القناة العامة' : null), thread);
+      if (ch) {
+        const intervalSeconds = clampIntervalSeconds(parseIntervalSecondsFromArabic(asciiInput) ?? 0);
+        const topic = topicMatch[1]
+          .replace(/كل\s*\d+\s*(?:ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق).*$/i, '')
+          .trim();
+        const recentMsgs = await getChannelMessages(ch.id, 10);
+        const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
+
+        // Calls Gemini once (with 429 retry/error handling) before mutating chat history
+        const items = await generateDiverseVirtualPersonas({
+          topic,
+          count,
+          channelName: ch.name,
+          recentMessagesSample: sampleTexts,
+        });
+
+        const now = Date.now();
+        const draft: AiAssistantDraft = {
+          id: makeId('aidraft'),
+          ownerId: OWNER_ID,
+          ownerUsername: OWNER_USERNAME,
+          channelId: ch.id,
+          channelName: ch.name,
+          topic,
+          status: 'pending_approval',
+          items,
+          intervalSeconds,
+          nextPublishAt: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        store.drafts![draft.id] = draft;
+        saveAiAssistantDiskStore();
+        await tryWriteFirestoreDoc('ai_assistant_drafts', draft.id, draft);
+
+        thread = await updateThreadContext({
+          activeSection: 'channels',
+          activeChannelId: ch.id,
+          activeChannelName: ch.name,
+        });
+
+        await appendAuditLog({
+          actionType: 'prepare_virtual_personas',
+          command: cleanInput,
+          target: `${ch.name} (${ch.id})`,
+          status: 'pending',
+          details: `تم إعداد مسودة ${items.length} تفاعلات يمنية افتراضية حول "${topic}"${
+            intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''
+          } بانتظار اعتماد المالك.`,
+        });
+
+        const replyText = [
+          `تم إعداد مسودة تفاعلات من ${items.length} شخصيات يمنية افتراضية لقناة «${ch.name}» حول: "${topic}".`,
+          intervalSeconds > 0
+            ? `سيُضبط النشر التدريجي بفاصل ${intervalSeconds} ثانية بين كل رسالة عند الاعتماد.`
+            : 'يمكنك مراجعة النصوص وتعديلها أو تحديد فاصل زمني ثم الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».',
+        ].join('\n');
+
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          draftId: draft.id,
+          navigation: { tab: 'channels', channelId: ch.id, channelName: ch.name },
+          replyText,
+          toolSteps: [
+            {
+              toolName: 'prepare_virtual_persona_interactions',
+              labelAr: `إعداد ${items.length} تفاعلات لقناة «${ch.name}»`,
+              status: 'pending_confirmation',
+              summaryAr:
+                intervalSeconds > 0
+                  ? `جاهزة للمراجعة (بفاصل ${intervalSeconds} ثانية بين كل رسالة).`
+                  : 'جاهزة للمراجعة والاعتماد قبل النشر.',
+            },
+          ],
+        });
+      }
+    }
+  }
+
+  return null;
+}
+
 export async function processOwnerAiChat(userText: string): Promise<{
   userMessage: AiAssistantMessage;
   assistantMessage: AiAssistantMessage;
   thread: AiAssistantThread;
   activeDraft: AiAssistantDraft | null;
   activePendingAction: AiAssistantPendingAction | null;
+  createdAccounts?: CreatedUserCredential[];
 }> {
   const cleanInput = String(userText || '').trim();
   if (!cleanInput) {
     throw new Error('الرسالة فارغة.');
   }
 
-  const ai = getGeminiClient();
   const turnStartedAt = Date.now();
+
+  // 1. Try direct server execution first (0 Gemini API calls for admin/user/navigation/approval ops)
+  const directRes = await tryExecuteDirectArabicCommand(cleanInput, turnStartedAt);
+  if (directRes) {
+    return {
+      userMessage: directRes.userMessage,
+      assistantMessage: directRes.assistantMessage,
+      thread: directRes.thread,
+      activeDraft: directRes.activeDraft,
+      activePendingAction: directRes.activePendingAction,
+      ...(directRes.createdAccounts ? { createdAccounts: directRes.createdAccounts } : {}),
+    };
+  }
+
+  // 2. Complex / creative request -> use Gemini API with 429 handling
+  const ai = getGeminiClient();
 
   const userMessage = await appendChatMessage({
     role: 'user',
@@ -1543,19 +2573,23 @@ export async function processOwnerAiChat(userText: string): Promise<{
   let createdDraftId: string | null = null;
   let createdPendingActionId: string | null = null;
   let navigationDirective: AiNavigationDirective | null = null;
+  let createdAccountsBatch: CreatedUserCredential[] = [];
 
   let finalText = '';
   const MAX_TOOL_ROUNDS = 6;
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents,
-      config: {
-        systemInstruction: buildSystemInstruction(thread, prePending.draft, prePending.action),
-        tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
-      },
-    });
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const response = await callGeminiWithRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents,
+          config: {
+            systemInstruction: buildSystemInstruction(thread, prePending.draft, prePending.action),
+            tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+          },
+        })
+      );
 
     const fnCalls = response.functionCalls;
     const candidateContent = response.candidates?.[0]?.content;
@@ -2219,6 +3253,90 @@ export async function processOwnerAiChat(userText: string): Promise<{
             });
             toolResult = { pendingConfirmation: true, actionId: action.id, summaryAr: action.summaryAr };
           }
+        } else if (name === 'create_user_accounts') {
+          const cnt = Math.max(1, Math.min(30, Math.floor(Number(args.count) || 1)));
+          const customDisplayNames = Array.isArray(args.customDisplayNames)
+            ? args.customDisplayNames.map((x: unknown) => String(x || '').trim()).filter(Boolean)
+            : undefined;
+          const customPassword = args.customPassword ? String(args.customPassword).trim() : undefined;
+          const { created, failed } = await createUsersBatchViaAssistant({
+            count: cnt,
+            customDisplayNames,
+            customPassword,
+          });
+          if (created.length > 0) {
+            createdAccountsBatch = [...createdAccountsBatch, ...created];
+            navigationDirective = { tab: 'admin' };
+            await appendAuditLog({
+              actionType: 'create_user_accounts',
+              command: cleanInput,
+              target: created.map((u) => `@${u.username} (#${u.id})`).join(', '),
+              status: 'success',
+              details: `تم إنشاء ${created.length} حساب مستخدم بصلاحية user عبر أداة المساعد.`,
+            });
+            toolSteps.push({
+              toolName: name,
+              labelAr: `إنشاء ${created.length} حسابات (user)`,
+              status: 'ok',
+              summaryAr: `تم تسجيل ${created.length} حساب فعلي في النظام.`,
+            });
+          } else {
+            toolSteps.push({
+              toolName: name,
+              labelAr: 'إنشاء حسابات مستخدمين',
+              status: 'error',
+              summaryAr: failed[0]?.error || 'فشل الإنشاء.',
+            });
+          }
+          toolResult = { createdCount: created.length, accounts: created, failed };
+        } else if (name === 'update_user_account') {
+          const target = await resolveUserTarget(String(args.userQuery || ''));
+          if (!target) {
+            toolResult = { error: 'المستخدم غير موجود.' };
+          } else {
+            const updated = await updateRegularUserByAssistant({
+              userId: target.id,
+              ...(args.displayName !== undefined ? { displayName: String(args.displayName) } : {}),
+              ...(args.password !== undefined ? { password: String(args.password) } : {}),
+              ...(args.generateRandomPassword ? { generateRandomPassword: true } : {}),
+              ...(args.warningsCount !== undefined ? { warningsCount: Number(args.warningsCount) } : {}),
+            });
+            await appendAuditLog({
+              actionType: 'update_user_account',
+              command: cleanInput,
+              target: `@${updated.username} (#${updated.id})`,
+              status: 'success',
+              details: 'تم تحديث بيانات الحساب مباشرة.',
+            });
+            toolSteps.push({
+              toolName: name,
+              labelAr: `تحديث حساب @${updated.username}`,
+              status: 'ok',
+              summaryAr: updated.displayName,
+            });
+            toolResult = { updated };
+          }
+        } else if (name === 'delete_user_account') {
+          const target = await resolveUserTarget(String(args.userQuery || ''));
+          if (!target) {
+            toolResult = { error: 'المستخدم غير موجود.' };
+          } else {
+            const deleted = await deleteRegularUserByAssistant(target.id);
+            await appendAuditLog({
+              actionType: 'delete_user_account',
+              command: cleanInput,
+              target: `@${deleted.username} (#${deleted.id})`,
+              status: 'success',
+              details: `تم حذف حساب المستخدم ${deleted.displayName}.`,
+            });
+            toolSteps.push({
+              toolName: name,
+              labelAr: `حذف حساب @${deleted.username}`,
+              status: 'ok',
+              summaryAr: deleted.displayName,
+            });
+            toolResult = { deleted };
+          }
         } else if (name === 'get_audit_logs') {
           const lim = Math.max(1, Math.min(30, Number(args.limit) || 15));
           const logs = (store.auditLogs || []).slice(0, lim);
@@ -2233,6 +3351,9 @@ export async function processOwnerAiChat(userText: string): Promise<{
           toolResult = { error: `أداة غير معروفة: ${name}` };
         }
       } catch (toolErr: any) {
+        if (toolErr instanceof GeminiRateLimitError || toolErr instanceof GeminiConfigError) {
+          throw toolErr;
+        }
         toolSteps.push({
           toolName: name,
           labelAr: name,
@@ -2255,6 +3376,15 @@ export async function processOwnerAiChat(userText: string): Promise<{
       role: 'user',
       parts: fnResponseParts,
     });
+    }
+  } catch (loopErr) {
+    // Rollback unanswered user message if no steps executed so chat history stays clean
+    if (toolSteps.length === 0) {
+      store.messages = (store.messages || []).filter((m) => m.id !== userMessage.id);
+      saveAiAssistantDiskStore();
+      void tryDeleteFirestoreDoc('ai_assistant_messages', userMessage.id);
+    }
+    throw loopErr;
   }
 
   if (!finalText) {
@@ -2268,6 +3398,7 @@ export async function processOwnerAiChat(userText: string): Promise<{
     draftId: createdDraftId,
     pendingActionId: createdPendingActionId,
     navigation: navigationDirective,
+    createdAccounts: createdAccountsBatch.length > 0 ? createdAccountsBatch : null,
     timestamp: Date.now(),
   });
 
@@ -2282,5 +3413,6 @@ export async function processOwnerAiChat(userText: string): Promise<{
     thread,
     activeDraft,
     activePendingAction,
+    ...(createdAccountsBatch.length > 0 ? { createdAccounts: createdAccountsBatch } : {}),
   };
 }

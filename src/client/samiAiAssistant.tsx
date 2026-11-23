@@ -25,6 +25,15 @@ interface NavDirective {
   messageId?: string | null;
 }
 
+interface CreatedUserCredential {
+  id: number;
+  displayName: string;
+  username: string;
+  password: string;
+  role: string;
+  createdAt?: number;
+}
+
 interface AiMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -33,6 +42,7 @@ interface AiMessage {
   draftId?: string | null;
   pendingActionId?: string | null;
   navigation?: NavDirective | null;
+  createdAccounts?: CreatedUserCredential[] | null;
   timestamp: number;
 }
 
@@ -145,11 +155,29 @@ function formatTimeAr(ts: number): string {
 }
 
 const QUICK_COMMANDS = [
+  'أنشئ 3 حسابات مستخدمين بأسماء يمنية',
+  'اعرض قائمة المستخدمين',
   'اعرض كل القنوات المتاحة',
   'توجّه إلى القناة العامة',
   'اقرأ آخر 10 رسائل في القناة العامة',
-  'أنشئ 10 تفاعلات حول الصفقة التي حققت أهدافها وربحًا قدره 25 دولارًا',
+  'أنشئ 5 تفاعلات حول صفقة الذهب التي حققت ربحًا قدره 25 دولارًا',
 ];
+
+function formatNavigationLabelAr(nav: NavDirective): string {
+  if (nav.channelName) return nav.channelName;
+  if (nav.partnerName) return nav.partnerName;
+  const map: Record<string, string> = {
+    admin: 'لوحة الإدارة',
+    channels: 'القنوات',
+    dashboard: 'الرئيسية',
+    private_chat: 'المحادثات الخاصة',
+    history: 'السجل',
+    roadmap: 'خريطة الطريق',
+    settings: 'الإعدادات',
+    ai_assistant: 'المساعد الذكي',
+  };
+  return map[nav.tab] || nav.tab;
+}
 
 export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props) {
   const allowed = isMainOwnerSalim(currentUser);
@@ -177,8 +205,49 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
   const [busyDraftId, setBusyDraftId] = useState<string | null>(null);
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
 
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
+
+  const copyTextToClipboard = useCallback(async (text: string, toastLabel: string) => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        onToast?.(toastLabel);
+        return;
+      }
+    } catch {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      onToast?.(toastLabel);
+    } catch {
+      onToast?.('تعذر النسخ إلى الحافظة.');
+    }
+  }, [onToast]);
+
+  const exportAccountsCsv = useCallback((accounts: CreatedUserCredential[]) => {
+    const esc = (v: string | number) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['ID', 'DisplayName', 'Username', 'Password', 'Role'].join(',');
+    const rows = accounts.map((a) => [esc(a.id), esc(a.displayName), esc(a.username), esc(a.password), esc(a.role)].join(','));
+    const csv = '\uFEFF' + [header, ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `salim_users_${Date.now()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    onToast?.(`تم تصدير ${accounts.length} حسابات إلى ملف CSV.`);
+  }, [onToast]);
 
   const callAiApi = useCallback(async (path: string, options: RequestInit = {}) => {
     const token = currentUser?.token || readStoredJwt();
@@ -886,13 +955,106 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
 
                       <div className="whitespace-pre-wrap">{m.text}</div>
 
+                      {m.createdAccounts && m.createdAccounts.length > 0 && (
+                        <div className="mt-2.5 rounded-xl bg-[#080d19] border border-emerald-500/35 p-2.5 flex flex-col gap-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] font-black text-emerald-300">
+                                بيانات الحسابات المُنشأة ({m.createdAccounts.length})
+                              </span>
+                              <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/30 text-emerald-200 font-bold">
+                                صلاحية: user
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setRevealedPasswords((prev) => ({ ...prev, [m.id]: !prev[m.id] }))
+                                }
+                                className="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold cursor-pointer"
+                              >
+                                {revealedPasswords[m.id] ? 'إخفاء كلمات المرور' : 'إظهار كلمات المرور'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const allTxt = m.createdAccounts!
+                                    .map(
+                                      (a, idx) =>
+                                        `${idx + 1}. ${a.displayName} | Username: ${a.username} | Password: ${a.password} | Role: ${a.role}`
+                                    )
+                                    .join('\n');
+                                  void copyTextToClipboard(allTxt, 'تم نسخ بيانات الدخول لجميع الحسابات.');
+                                }}
+                                className="px-2 py-0.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-200 text-[10px] font-bold cursor-pointer"
+                              >
+                                نسخ الكل
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => exportAccountsCsv(m.createdAccounts!)}
+                                className="px-2 py-0.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/40 text-sky-200 text-[10px] font-bold cursor-pointer"
+                              >
+                                تصدير CSV
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1.5 max-h-60 overflow-y-auto">
+                            {m.createdAccounts.map((acc) => {
+                              const showPass = Boolean(revealedPasswords[m.id]);
+                              return (
+                                <div
+                                  key={acc.id}
+                                  className="rounded-lg bg-[#0d1424] border border-slate-800 px-2.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                                >
+                                  <div className="flex flex-col gap-0.5">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[10px] text-slate-500 font-bold">#{acc.id}</span>
+                                      <span className="font-black text-white">{acc.displayName}</span>
+                                      <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-slate-800 text-emerald-300 font-bold">
+                                        {acc.role}
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2.5 text-[10.5px] text-slate-300 font-mono" dir="ltr">
+                                      <span>
+                                        user: <strong className="text-amber-300">{acc.username}</strong>
+                                      </span>
+                                      <span>
+                                        pass:{' '}
+                                        <strong className="text-emerald-300">
+                                          {showPass ? acc.password : '••••••••••••'}
+                                        </strong>
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void copyTextToClipboard(
+                                        `الاسم: ${acc.displayName}\nاسم المستخدم: ${acc.username}\nكلمة المرور: ${acc.password}`,
+                                        `تم نسخ بيانات دخول @${acc.username}`
+                                      )
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-200 text-[10px] font-bold cursor-pointer shrink-0"
+                                  >
+                                    نسخ الدخول
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
                       {m.navigation && onNavigate && (
                         <button
                           type="button"
                           onClick={() => onNavigate(m.navigation!)}
                           className="mt-2 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-200 text-[11px] font-bold cursor-pointer"
                         >
-                          فتح {m.navigation.channelName || m.navigation.partnerName || m.navigation.tab} ↗
+                          فتح {formatNavigationLabelAr(m.navigation)} ↗
                         </button>
                       )}
                     </div>
