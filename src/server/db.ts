@@ -1513,7 +1513,19 @@ export async function getChannelMessages(channelId: string, limitCount = 80, bef
     merged = merged.filter((m) => m.timestamp < beforeTimestamp);
   }
 
-  return limitCount > 0 ? merged.slice(-limitCount) : merged;
+  const slice = limitCount > 0 ? merged.slice(-limitCount) : merged;
+  return slice.map((m) => {
+    if (m.senderRole === 'virtual_persona' || m.isVirtualPersona || m.virtualPersonaLabel) {
+      const normalized: ChannelMessage = {
+        ...m,
+        senderRole: m.senderRole === 'virtual_persona' ? 'user' : m.senderRole,
+      };
+      delete normalized.isVirtualPersona;
+      delete normalized.virtualPersonaLabel;
+      return normalized;
+    }
+    return m;
+  });
 }
 
 export async function saveChannelMessage(message: ChannelMessage): Promise<void> {

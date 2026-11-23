@@ -1174,7 +1174,7 @@ function buildSystemInstruction(thread: AiAssistantThread, openDraft: AiAssistan
    - عند طلب إنشاء تفاعلات أو رسائل متعددة من شخصيات افتراضية، استدعِ الأداة prepare_virtual_persona_interactions لإعداد مسودة بشخصيات يمنية متنوعة وعرضها على المالك سليم للمراجعة والاعتماد أولاً.
    - إذا حدد المالك وقتاً أو فاصلاً زمنياً بين كل رسالة وأخرى (مثل: "كل 30 ثانية" أو "كل دقيقة")، مرّر قيمة intervalSeconds بالثواني إلى prepare_virtual_persona_interactions أو confirm_pending.
    - لا تنشر التفاعلات تلقائياً قبل مراجعة المالك وموافقته.
-   - في هذا التطبيق تُميَّز الشخصيات الافتراضية بشفافية على أنها «شخصية افتراضية»، ولا تُقدَّم تفاعلاتها كشهادات حقيقية لأعضاء مستقلين.
+   - لا تُضف وسم "شخصية افتراضية" بجانب أسماء الشخصيات أو الرسائل المنشورة، واحرص على إظهارها بأسمائها اليمنية الطبيعية فقط.
    - يُمنع منعاً باتاً كتابة عبارة "مولّد بالذكاء الاصطناعي" أو ترديدها.
 6. الإجراءات الإدارية للقنوات والرسائل الحساسة (إرسال رسالة قناة/خاصة، إنشاء/تعديل/حذف قناة، إضافة/إزالة عضو، تغيير رتبة مشرف، تثبيت رسالة):
    - استخدم أداة propose_* المناسبة لتجهيز الإجراء وعرض ملخصه الواضح للمالك بانتظار تأكيده الصريح.
@@ -1216,20 +1216,18 @@ function buildVirtualPersonaChannelMessage(
   timestamp: number
 ): ChannelMessage {
   const hashNum = crypto.createHash('md5').update(`${draft.id}:${item.id}:${index}`).digest().readUInt16BE(0);
-  const senderId = -(10001 + (hashNum % 8999));
+  const senderId = 10000 + (hashNum % 89999);
   return {
     id: `msg_${timestamp}_${index}_${crypto.randomBytes(3).toString('hex')}`,
     channelId,
     senderId,
     senderName: item.personaName,
-    senderRole: 'virtual_persona',
+    senderRole: 'user',
     senderAvatarUrl: null,
     text: sanitizeNoBannedAiDisclaimer(item.text),
     reactions: {},
     isPinned: false,
     isDeleted: false,
-    isVirtualPersona: true,
-    virtualPersonaLabel: 'شخصية افتراضية',
     createdByOwnerId: OWNER_ID,
     timestamp,
   };
@@ -1276,7 +1274,7 @@ async function publishNextScheduledDraftItem(draftId: string): Promise<void> {
     await tryWriteFirestoreDoc('ai_assistant_drafts', failed.id, failed);
     await appendAuditLog({
       actionType: 'publish_virtual_personas',
-      command: 'نشر مجدول لشخصيات افتراضية',
+      command: 'نشر مجدول للتفاعلات',
       target: `${draft.channelName} (${draft.channelId})`,
       status: 'error',
       details: 'تم إيقاف النشر المجدول لأن القناة المستهدفة لم تعد موجودة.',
@@ -1449,7 +1447,7 @@ export async function approveAndPublishDraft(
     command: commandContext,
     target: `${channel.name} (${channel.id})`,
     status: 'success',
-    details: `تم نشر ${publishedMessages.length} تفاعلات لشخصيات افتراضية حول: ${draft.topic}`,
+    details: `تم نشر ${publishedMessages.length} تفاعلات حول: ${draft.topic}`,
   });
 
   if (publishedMessages.length > 0) {
@@ -2557,7 +2555,7 @@ async function tryExecuteDirectArabicCommand(cleanInput: string, turnStartedAt: 
       });
       const lines = msgs.map(
         (m, idx) =>
-          `${idx + 1}. ${m.senderName}${m.isVirtualPersona ? ' (شخصية افتراضية)' : ''}: ${
+          `${idx + 1}. ${m.senderName}: ${
             m.text || (m.imageUrl ? '[صورة]' : m.audioUrl ? '[رسالة صوتية]' : '[مرفق]')
           }`
       );
@@ -2664,13 +2662,13 @@ async function tryExecuteDirectArabicCommand(cleanInput: string, turnStartedAt: 
           command: cleanInput,
           target: `${ch.name} (${ch.id})`,
           status: 'pending',
-          details: `تم إعداد مسودة ${items.length} تفاعلات يمنية افتراضية حول "${effectiveTopic}"${
+          details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${effectiveTopic}"${
             intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''
           } بانتظار اعتماد المالك.`,
         });
 
         const replyText = [
-          `تم التوجه إلى قناة «${ch.name}» وإعداد مسودة تفاعلات من ${items.length} شخصيات يمنية افتراضية حول: "${effectiveTopic}".`,
+          `تم التوجه إلى قناة «${ch.name}» وإعداد مسودة تفاعلات من ${items.length} أعضاء يمنيين حول: "${effectiveTopic}".`,
           intervalSeconds > 0
             ? `سيُضبط النشر التدريجي بفاصل ${intervalSeconds} ثانية بين كل رسالة عند الاعتماد.`
             : 'يمكنك مراجعة النصوص وتعديلها أو تحديد فاصل زمني ثم الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».',
@@ -2714,7 +2712,7 @@ function buildPartialToolSummaryAr(opts: {
     lines.push(`تم تحديث السياق والانتقال إلى قناة «${opts.navigationDirective.channelName}».`);
   }
   if (opts.createdDraftId) {
-    lines.push('تم تجهيز مسودة التفاعلات الافتراضية وعرضها للمراجعة والاعتماد.');
+    lines.push('تم تجهيز مسودة التفاعلات وعرضها للمراجعة والاعتماد.');
   }
   if (opts.createdPendingActionId) {
     lines.push('تم تجهيز الإجراء الإداري المعلق بانتظار تأكيدك.');
@@ -2895,7 +2893,7 @@ async function executeInternalFallbackNlu(params: {
         command: params.cleanInput,
         target: `${ch.name} (${ch.id})`,
         status: 'pending',
-        details: `تم إعداد مسودة ${items.length} تفاعلات يمنية افتراضية حول "${effectiveTopic}" عبر المحرك الداخلي.`,
+        details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${effectiveTopic}" عبر المحرك الداخلي.`,
       });
 
       toolSteps.push({
@@ -2905,7 +2903,7 @@ async function executeInternalFallbackNlu(params: {
         summaryAr: intervalSeconds > 0 ? `جاهزة للمراجعة (كل ${intervalSeconds} ثانية).` : 'جاهزة للمراجعة والاعتماد قبل النشر.',
       });
 
-      replyText = `تم تجهيز مسودة من ${items.length} شخصيات يمنية افتراضية لقناة «${ch.name}» حول: "${effectiveTopic}".\nيمكنك تعديلها أو الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».`;
+      replyText = `تم تجهيز مسودة من ${items.length} مشاركين يمنيين لقناة «${ch.name}» حول: "${effectiveTopic}".\nيمكنك تعديلها أو الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».`;
       return finishFallback();
     }
   }
@@ -3159,8 +3157,7 @@ export async function processOwnerAiChat(userText: string): Promise<{
               id: m.id,
               senderId: m.senderId,
               senderName: m.senderName,
-              senderRole: m.senderRole,
-              isVirtualPersona: Boolean(m.isVirtualPersona || m.senderRole === 'virtual_persona'),
+              senderRole: m.senderRole === 'virtual_persona' ? 'user' : m.senderRole,
               text: m.text || (m.imageUrl ? '[صورة]' : m.audioUrl ? '[رسالة صوتية]' : m.fileName ? `[ملف: ${m.fileName}]` : ''),
               timestamp: m.timestamp,
               isPinned: Boolean(m.isPinned),
@@ -3234,7 +3231,7 @@ export async function processOwnerAiChat(userText: string): Promise<{
           if (!ch) {
             toolSteps.push({
               toolName: name,
-              labelAr: 'إعداد شخصيات افتراضية',
+              labelAr: 'إعداد تفاعلات الأعضاء',
               status: 'error',
               summaryAr: 'لم يتم العثور على القناة المستهدفة.',
             });
@@ -3283,7 +3280,7 @@ export async function processOwnerAiChat(userText: string): Promise<{
               command: cleanInput,
               target: `${ch.name} (${ch.id})`,
               status: 'pending',
-              details: `تم إعداد مسودة ${items.length} تفاعلات يمنية افتراضية حول "${topic}"${intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''} بانتظار اعتماد المالك.`,
+              details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${topic}"${intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''} بانتظار اعتماد المالك.`,
             });
 
             toolSteps.push({

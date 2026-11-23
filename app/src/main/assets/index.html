@@ -27,6 +27,19 @@
           localStorage.removeItem('sami_auth_user_session');
           localStorage.removeItem('sami_active_session');
         }
+        if (!localStorage.getItem('sami_vp_badge_purged_v2')) {
+          for (let i = localStorage.length - 1; i >= 0; i--) {
+            const k = localStorage.key(i);
+            if (!k || !k.includes('cached_channel_msgs')) continue;
+            try {
+              const rawVal = localStorage.getItem(k) || '';
+              if (rawVal.includes('virtual_persona') || rawVal.includes('شخصية افتراضية')) {
+                localStorage.removeItem(k);
+              }
+            } catch {}
+          }
+          localStorage.setItem('sami_vp_badge_purged_v2', '1');
+        }
       } catch(e) {}
     </script>
     <link rel="stylesheet" crossorigin href="/assets/index-D5y8_Xmj.css">
@@ -74,9 +87,9 @@
       <div class="overlay"></div>
     </div>
     <div id="root" class="relative z-0"></div>
-    <script type="module" crossorigin src="/assets/index-DoqMLvwt.js"></script>
+    <script type="module" crossorigin src="/assets/index-DoqMLvwt.js?v=20261123c"></script>
     <script type="module" crossorigin src="/assets/sami-channels-fx.js"></script>
     <script type="module" crossorigin src="/assets/sami-updater.js"></script>
-    <script type="module" crossorigin src="/assets/sami-ai-assistant.js"></script>
+    <script type="module" crossorigin src="/assets/sami-ai-assistant.js?v=20261123c"></script>
   </body>
 </html>

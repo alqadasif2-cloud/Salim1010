@@ -729,7 +729,7 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div>
                     <div className="text-xs sm:text-sm font-black text-amber-300">
-                      مراجعة مسودة التفاعلات الافتراضية ({items.length}) • قناة «{draft.channelName}»
+                      مراجعة مسودة التفاعلات ({items.length}) • قناة «{draft.channelName}»
                     </div>
                     <div className="text-[11px] text-slate-400 mt-0.5">الموضوع: {draft.topic}</div>
                   </div>
@@ -771,9 +771,6 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
                           ) : (
                             <span className="font-black text-amber-300">{item.personaName}</span>
                           )}
-                          <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-400/30 font-bold">
-                            شخصية افتراضية
-                          </span>
                           <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
                             {item.dialect}
                           </span>
@@ -900,7 +897,7 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
               <div className="py-8 text-center flex flex-col items-center gap-3">
                 <div className="text-amber-300 font-black text-sm">مرحباً بك يا قائد سليم في المساعد الذكي</div>
                 <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-                  اكتب أي أمر باللغة العربية — مثل التنقل بين القنوات، قراءة الرسائل، إعداد تفاعلات متنوعة بشخصيات افتراضية ومراجعتها قبل النشر، أو إدارة القنوات والأعضاء.
+                  اكتب أي أمر باللغة العربية — مثل التنقل بين القنوات، قراءة الرسائل، إعداد تفاعلات متنوعة للأعضاء ومراجعتها قبل النشر، أو إدارة القنوات والأعضاء.
                 </p>
                 <div className="flex flex-wrap justify-center gap-2 mt-1">
                   {QUICK_COMMANDS.map((cmd) => (
