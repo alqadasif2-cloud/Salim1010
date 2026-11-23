@@ -529,41 +529,32 @@ nav,
   }
 }
 
-@keyframes salimCtaGlossSweep {
-  0% {
-    transform: translate3d(150%, 0, 0) skewX(-22deg);
-    opacity: 0;
+@keyframes salimCtaGoldenGlow {
+  0%, 100% {
+    opacity: 0.36;
   }
-  12% {
-    opacity: 0.75;
-  }
-  52% {
-    opacity: 0.65;
-  }
-  72% {
-    transform: translate3d(-160%, 0, 0) skewX(-22deg);
-    opacity: 0;
-  }
-  100% {
-    transform: translate3d(-160%, 0, 0) skewX(-22deg);
-    opacity: 0;
+  50% {
+    opacity: 0.88;
   }
 }
 
 @keyframes salimCtaLightBeam {
-  0%, 22% {
-    transform: translate3d(175%, 0, 0) skewX(-26deg);
+  0% {
+    transform: translate3d(105%, 0, 0);
     opacity: 0;
   }
-  30% {
-    opacity: 0.95;
+  8% {
+    opacity: 0.96;
   }
-  62% {
-    transform: translate3d(-175%, 0, 0) skewX(-26deg);
-    opacity: 0.85;
+  48% {
+    opacity: 0.96;
   }
-  70%, 100% {
-    transform: translate3d(-175%, 0, 0) skewX(-26deg);
+  58% {
+    transform: translate3d(-105%, 0, 0);
+    opacity: 0;
+  }
+  100% {
+    transform: translate3d(-105%, 0, 0);
     opacity: 0;
   }
 }
@@ -854,10 +845,13 @@ nav,
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  min-height: 36px;
+  min-height: 40px;
   border-radius: 9999px !important;
-  padding-left: 0.9rem !important;
-  padding-right: 0.9rem !important;
+  padding-left: 0.95rem !important;
+  padding-right: 0.95rem !important;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
   background: linear-gradient(
     135deg,
     #704d10 0%,
@@ -866,16 +860,16 @@ nav,
     #c48c23 74%,
     #6b480e 100%
   ) !important;
-  border: 1px solid rgba(254, 240, 138, 0.88) !important;
+  border: 1px solid rgba(254, 240, 138, 0.90) !important;
   color: #160e02 !important;
   font-weight: 900 !important;
-  text-shadow: 0 1px 0 rgba(255, 250, 224, 0.48);
+  text-shadow: 0 1px 0 rgba(255, 250, 224, 0.52);
   box-shadow:
-    inset 0 1px 0 rgba(255, 251, 235, 0.72),
-    inset 0 -1px 2px rgba(92, 57, 7, 0.52),
-    0 0 18px rgba(251, 191, 36, 0.50),
-    0 5px 16px rgba(217, 119, 6, 0.38) !important;
-  transition: transform 0.14s cubic-bezier(0.16, 1, 0.3, 1), filter 0.14s ease, box-shadow 0.18s ease;
+    inset 0 1px 0 rgba(255, 252, 236, 0.82),
+    inset 0 -1.5px 2px rgba(82, 49, 5, 0.58),
+    0 0 18px rgba(251, 191, 36, 0.48),
+    0 4px 14px rgba(217, 119, 6, 0.36) !important;
+  transition: transform 130ms cubic-bezier(0.16, 1, 0.3, 1), filter 120ms ease, box-shadow 140ms ease, border-color 120ms ease;
 }
 
 .salim-pkg-cta > * {
@@ -883,78 +877,100 @@ nav,
   z-index: 2;
 }
 
-/* Continuous glossy metallic reflection sweep */
+/* Metallic golden glow layer pulsing softly (compositor-only opacity) */
 .salim-pkg-cta::before {
   content: "";
   position: absolute;
-  top: -15%;
-  bottom: -15%;
-  left: -30%;
-  width: 58%;
+  inset: 0;
+  border-radius: inherit;
   z-index: 1;
   pointer-events: none;
-  background: linear-gradient(
-    105deg,
-    transparent 12%,
-    rgba(255, 251, 235, 0.34) 44%,
-    rgba(255, 255, 255, 0.64) 50%,
-    rgba(255, 251, 235, 0.30) 56%,
-    transparent 88%
-  );
-  animation: salimCtaGlossSweep 3.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-  will-change: transform, opacity;
+  background:
+    radial-gradient(125% 95% at 50% 0%, rgba(255, 253, 240, 0.48) 0%, rgba(254, 240, 138, 0.26) 48%, rgba(245, 158, 11, 0.12) 100%);
+  box-shadow: inset 0 0 10px rgba(254, 240, 138, 0.45);
+  animation: salimCtaGoldenGlow 3.2s ease-in-out infinite;
+  transition: opacity 70ms ease;
+  will-change: opacity;
 }
 
-/* Thin crisp specular light beam passing & returning repeatedly */
+/* Thin crisp diagonal luminous ribbon gliding regularly across 100% of the surface */
 .salim-pkg-cta::after {
   content: "";
   position: absolute;
-  top: -20%;
-  bottom: -20%;
-  left: -20%;
-  width: 14px;
+  top: -35%;
+  bottom: -35%;
+  left: 0;
+  width: 100%;
   z-index: 1;
   pointer-events: none;
   background: linear-gradient(
-    90deg,
+    108deg,
     transparent 0%,
-    rgba(255, 255, 255, 0.92) 50%,
+    transparent 43.5%,
+    rgba(254, 240, 138, 0.26) 46.8%,
+    rgba(255, 252, 240, 0.96) 50%,
+    rgba(254, 240, 138, 0.26) 53.2%,
+    transparent 56.5%,
     transparent 100%
   );
-  animation: salimCtaLightBeam 4.6s ease-in-out infinite;
+  animation: salimCtaLightBeam 3.2s cubic-bezier(0.36, 0, 0.22, 1) infinite;
   will-change: transform, opacity;
 }
 
-/* Stagger shimmer rhythm naturally across rows */
+/* Stagger rhythm naturally across rows */
 .salim-pkg-row:nth-child(2) .salim-pkg-cta::before {
-  animation-delay: 1.15s;
+  animation-delay: 0.95s;
 }
 .salim-pkg-row:nth-child(2) .salim-pkg-cta::after {
-  animation-delay: 1.45s;
+  animation-delay: 0.95s;
 }
 .salim-pkg-row:nth-child(3) .salim-pkg-cta::before {
-  animation-delay: 2.3s;
+  animation-delay: 1.9s;
 }
 .salim-pkg-row:nth-child(3) .salim-pkg-cta::after {
-  animation-delay: 2.75s;
+  animation-delay: 1.9s;
 }
 
-.salim-pkg-row:hover .salim-pkg-cta {
-  transform: scale(1.03);
-  filter: brightness(1.06);
+.salim-pkg-cta:focus-visible {
+  outline: 2px solid #fef08a;
+  outline-offset: 2px;
+}
+
+.salim-pkg-row:hover .salim-pkg-cta,
+.salim-pkg-cta:hover {
+  transform: scale(1.025);
+  filter: brightness(1.07);
+  border-color: rgba(254, 249, 195, 0.95) !important;
   box-shadow:
-    inset 0 1px 0 rgba(255, 251, 235, 0.85),
+    inset 0 1px 0 rgba(255, 252, 236, 0.90),
     0 0 24px rgba(253, 224, 71, 0.68),
     0 6px 20px rgba(217, 119, 6, 0.48) !important;
 }
 
-.salim-pkg-cta:active {
-  transform: scale(0.945) translate3d(0, 1px, 0) !important;
-  filter: brightness(1.2) !important;
+.salim-pkg-cta:hover::before {
+  opacity: 0.92;
+}
+
+/* Instant tactile press with immediate surge in light intensity */
+.salim-pkg-row:hover .salim-pkg-cta:active,
+.salim-pkg-cta:active,
+.salim-pkg-row:hover .salim-pkg-cta.is-pressed,
+.salim-pkg-cta.is-pressed {
+  transition-duration: 28ms !important;
+  transform: translate3d(0, 1.5px, 0) scale(0.95) !important;
+  filter: brightness(1.26) contrast(1.06) !important;
+  border-color: #fef9c3 !important;
   box-shadow:
-    inset 0 1px 4px rgba(92, 57, 7, 0.55),
-    0 0 28px rgba(254, 240, 138, 0.88),
-    0 2px 10px rgba(245, 158, 11, 0.55) !important;
+    inset 0 2px 5px rgba(82, 48, 5, 0.56),
+    inset 0 0 14px rgba(255, 251, 235, 0.62),
+    0 0 32px rgba(254, 240, 138, 0.94),
+    0 2px 8px rgba(217, 119, 6, 0.56) !important;
+}
+
+.salim-pkg-cta:active::before,
+.salim-pkg-cta.is-pressed::before {
+  opacity: 1 !important;
+  animation-play-state: paused;
 }
 
 .salim-pkg-status-open {

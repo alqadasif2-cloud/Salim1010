@@ -2,7 +2,7 @@
  * Salim Channels & Navigation Visual/Motion FX Engine
  * - GPU-friendly, visibility-aware, device-adaptive
  * - 1. Smooth traveling golden energy dock indicator across all bottom nav tabs
- * - 2. Organic golden electric arcs, flashes & sparks transferring randomly across visible channel cards
+ * - 2. Smooth, organic golden electric arcs, flashes & sparks transferring randomly across visible channel cards
  * - Zero React re-render overhead, zero layout thrashing, auto-pauses off-screen / hidden / on page leave
  */
 (function () {
@@ -77,7 +77,6 @@
       traveler.classList.add('no-transition');
       traveler.style.transform = 'translate3d(' + centerX.toFixed(1) + 'px, 0, 0)';
       traveler.style.opacity = '1';
-      // Force style flush once on initial mount so subsequent clicks animate cleanly
       void traveler.offsetWidth;
       traveler.classList.remove('no-transition');
       lastNavTabKey = tabKey;
@@ -113,7 +112,6 @@
     });
   }
 
-  // Instant visual response on pointerdown/click before even waiting for React MutationObserver
   document.addEventListener(
     'click',
     function (ev) {
@@ -135,10 +133,81 @@
   );
 
   /* ------------------------------------------------------------------------
-   * 3. ELECTRIC GOLDEN ARCS & SPARKS ENGINE (VISIBLE CHANNEL CARDS ONLY)
+   * 2B. ZERO-LATENCY TACTILE PRESS FEEDBACK FOR "FULL DETAILS" CTA BUTTONS
    * ------------------------------------------------------------------------ */
-  var MAX_SPARKS = 8;
+  var ctaPressTimers = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var activePressedCta = null;
+
+  function triggerCtaPress(btn) {
+    if (!btn) return;
+    if (ctaPressTimers) {
+      var prevTimer = ctaPressTimers.get(btn);
+      if (prevTimer) clearTimeout(prevTimer);
+    }
+    activePressedCta = btn;
+    btn.classList.add('is-pressed');
+  }
+
+  function releaseCtaPress(btn, immediate) {
+    var targetBtn = btn || activePressedCta;
+    if (!targetBtn) return;
+    if (targetBtn === activePressedCta) {
+      activePressedCta = null;
+    }
+    if (ctaPressTimers) {
+      var prevTimer = ctaPressTimers.get(targetBtn);
+      if (prevTimer) clearTimeout(prevTimer);
+    }
+    if (immediate) {
+      targetBtn.classList.remove('is-pressed');
+      return;
+    }
+    var tid = setTimeout(function () {
+      targetBtn.classList.remove('is-pressed');
+      if (ctaPressTimers) ctaPressTimers.delete(targetBtn);
+    }, 110);
+    if (ctaPressTimers) {
+      ctaPressTimers.set(targetBtn, tid);
+    }
+  }
+
+  document.addEventListener(
+    'pointerdown',
+    function (ev) {
+      var target = ev.target;
+      if (!target || typeof target.closest !== 'function') return;
+      var btn = target.closest('.salim-pkg-cta');
+      if (btn) triggerCtaPress(btn);
+    },
+    { passive: true, capture: true }
+  );
+
+  document.addEventListener(
+    'pointerup',
+    function (ev) {
+      var target = ev.target;
+      var btn = target && typeof target.closest === 'function' ? target.closest('.salim-pkg-cta') : null;
+      releaseCtaPress(btn, false);
+    },
+    { passive: true, capture: true }
+  );
+
+  document.addEventListener(
+    'pointercancel',
+    function () {
+      releaseCtaPress(null, true);
+    },
+    { passive: true, capture: true }
+  );
+
+  /* ------------------------------------------------------------------------
+   * 3. ELECTRIC GOLDEN ARCS, FLASHES & SPARKS ENGINE (VISIBLE CARDS ONLY)
+   * ------------------------------------------------------------------------ */
+  var MAX_SPARKS = 10;
+  var JITTER_COUNT = 32;
   var visibleCards = new Set();
+  var observedCards = typeof WeakSet === 'function' ? new WeakSet() : null;
+  var observedGrid = null;
   var cardObserver = null;
   var gridResizeObserver = null;
   var stagePresent = false;
@@ -146,7 +215,6 @@
   var lastFrameTs = 0;
   var nextTransferAt = 0;
 
-  // Pooled canvas slots (only 2 canvases in DOM at maximum!)
   function createSlotState() {
     var canvas = document.createElement('canvas');
     canvas.className = 'salim-electric-canvas';
@@ -159,6 +227,8 @@
         active: false,
         x: 0,
         y: 0,
+        prevX: 0,
+        prevY: 0,
         vx: 0,
         vy: 0,
         life: 0,
@@ -179,11 +249,13 @@
       phase: Math.random() * 100,
       arcOffsetA: Math.random(),
       arcOffsetB: (Math.random() + 0.45) % 1,
-      arcSpeedA: 0.085 + Math.random() * 0.05,
-      arcSpeedB: -(0.065 + Math.random() * 0.045),
+      arcSpeedA: 0.08 + Math.random() * 0.045,
+      arcSpeedB: -(0.06 + Math.random() * 0.04),
       lastJitterAt: 0,
-      jitterSeeds: new Float32Array(32),
-      flashAmp: 0,
+      jitterCurr: new Float32Array(JITTER_COUNT),
+      jitterTarget: new Float32Array(JITTER_COUNT),
+      flashAmp: 0.35,
+      flashTarget: 0.45,
       sparks: sparks
     };
   }
@@ -191,14 +263,16 @@
   var slotPrimary = createSlotState();
   var slotFading = createSlotState();
 
-  function refreshJitterSeeds(slot) {
-    for (var i = 0; i < slot.jitterSeeds.length; i++) {
-      slot.jitterSeeds[i] = (Math.random() - 0.5) * 2;
+  function refreshJitterTargets(slot) {
+    for (var i = 0; i < JITTER_COUNT; i++) {
+      slot.jitterTarget[i] = (Math.random() - 0.5) * 2;
     }
-    slot.flashAmp = Math.random() < 0.38 ? 0.65 + Math.random() * 0.35 : 0.15 + Math.random() * 0.25;
+    slot.flashTarget = Math.random() < 0.34 ? 0.68 + Math.random() * 0.32 : 0.18 + Math.random() * 0.28;
   }
-  refreshJitterSeeds(slotPrimary);
-  refreshJitterSeeds(slotFading);
+  refreshJitterTargets(slotPrimary);
+  refreshJitterTargets(slotFading);
+  slotPrimary.jitterCurr.set(slotPrimary.jitterTarget);
+  slotFading.jitterCurr.set(slotFading.jitterTarget);
 
   function syncCanvasSize(slot) {
     if (!slot.card) return false;
@@ -206,7 +280,7 @@
     var ch = slot.card.offsetHeight;
     if (!cw || !ch) return false;
 
-    var pad = 10; // matches CSS inset: -10px
+    var pad = 10; // matches CSS .salim-ch-electric-slot { inset: -10px }
     var totalW = cw + pad * 2;
     var totalH = ch + pad * 2;
     var maxDpr = perfTier === 'ultra' ? 2 : 1.5;
@@ -251,7 +325,8 @@
     slot.targetOpacity = 1;
     slot.arcOffsetA = Math.random();
     slot.arcOffsetB = (slot.arcOffsetA + 0.42 + Math.random() * 0.2) % 1;
-    refreshJitterSeeds(slot);
+    refreshJitterTargets(slot);
+    slot.jitterCurr.set(slot.jitterTarget);
     if (slot.canvas.parentNode !== host) {
       host.appendChild(slot.canvas);
     }
@@ -269,7 +344,6 @@
     var perim = 2 * straightW + 2 * straightH + 4 * arcLen;
     var d = t * perim;
 
-    // 1. Top edge (left -> right)
     if (d < straightW) {
       out.x = x + r + d;
       out.y = y;
@@ -279,7 +353,6 @@
     }
     d -= straightW;
 
-    // 2. Top-right corner
     if (d < arcLen) {
       var a = -Math.PI / 2 + (d / arcLen) * (Math.PI / 2);
       var cos = Math.cos(a);
@@ -292,7 +365,6 @@
     }
     d -= arcLen;
 
-    // 3. Right edge (top -> bottom)
     if (d < straightH) {
       out.x = x + w;
       out.y = y + r + d;
@@ -302,7 +374,6 @@
     }
     d -= straightH;
 
-    // 4. Bottom-right corner
     if (d < arcLen) {
       var a2 = (d / arcLen) * (Math.PI / 2);
       var cos2 = Math.cos(a2);
@@ -315,7 +386,6 @@
     }
     d -= arcLen;
 
-    // 5. Bottom edge (right -> left)
     if (d < straightW) {
       out.x = x + w - r - d;
       out.y = y + h;
@@ -325,7 +395,6 @@
     }
     d -= straightW;
 
-    // 6. Bottom-left corner
     if (d < arcLen) {
       var a3 = Math.PI / 2 + (d / arcLen) * (Math.PI / 2);
       var cos3 = Math.cos(a3);
@@ -338,7 +407,6 @@
     }
     d -= arcLen;
 
-    // 7. Left edge (bottom -> top)
     if (d < straightH) {
       out.x = x;
       out.y = y + h - r - d;
@@ -348,7 +416,6 @@
     }
     d -= straightH;
 
-    // 8. Top-left corner
     var a4 = Math.PI + (d / arcLen) * (Math.PI / 2);
     var cos4 = Math.cos(a4);
     var sin4 = Math.sin(a4);
@@ -362,84 +429,117 @@
   var boltPtsX = new Float32Array(28);
   var boltPtsY = new Float32Array(28);
 
+  function emitSparkFromPoint(slot, x, y, nx, ny, boost) {
+    var maxSparkCount = perfTier === 'ultra' ? MAX_SPARKS : 6;
+    for (var sIdx = 0; sIdx < maxSparkCount; sIdx++) {
+      var sp = slot.sparks[sIdx];
+      if (!sp.active) {
+        sp.active = true;
+        sp.x = x;
+        sp.y = y;
+        sp.prevX = x;
+        sp.prevY = y;
+        var outSpeed = (14 + Math.random() * 24) * (boost ? 1.25 : 1);
+        var tangentSign = Math.random() < 0.5 ? -1 : 1;
+        var tangentSpeed = tangentSign * (8 + Math.random() * 16);
+        sp.vx = nx * outSpeed - ny * tangentSpeed + (Math.random() - 0.5) * 10;
+        sp.vy = ny * outSpeed + nx * tangentSpeed + (Math.random() - 0.5) * 10;
+        sp.life = 0;
+        sp.maxLife = 0.28 + Math.random() * 0.28;
+        sp.size = 1.0 + Math.random() * 1.35;
+        break;
+      }
+    }
+  }
+
   function drawElectricArcSpan(ctx, slot, rectX, rectY, rectW, rectH, radius, startT, spanT, seedOffset, alpha, spawnSparks) {
     var steps = perfTier === 'ultra' ? 22 : 16;
-    var jitterMag = 5.4;
+    var jitterMag = 5.0;
+    var headNx = 0;
+    var headNy = -1;
 
     for (var i = 0; i <= steps; i++) {
       var frac = i / steps;
       var t = startT + frac * spanT;
       sampleRoundedRectPerimeter(t, rectX, rectY, rectW, rectH, radius, ptScratch);
 
-      // Taper displacement at arc endpoints so tips dissolve neatly onto card border
       var edgeFade = Math.sin(frac * Math.PI);
-      var seed = slot.jitterSeeds[(i + seedOffset) % slot.jitterSeeds.length];
-      var disp = seed * jitterMag * (0.25 + 0.75 * edgeFade);
+      var seed = slot.jitterCurr[(i + seedOffset) % JITTER_COUNT];
+      var disp = seed * jitterMag * (0.22 + 0.78 * edgeFade);
 
       boltPtsX[i] = ptScratch.x + ptScratch.nx * disp;
       boltPtsY[i] = ptScratch.y + ptScratch.ny * disp;
 
-      // Occasional spark birth along energized arc
-      if (spawnSparks && i > 2 && i < steps - 2 && Math.random() < (perfTier === 'ultra' ? 0.065 : 0.038)) {
-        var maxSparkCount = perfTier === 'ultra' ? MAX_SPARKS : 5;
-        for (var sIdx = 0; sIdx < maxSparkCount; sIdx++) {
-          var sp = slot.sparks[sIdx];
-          if (!sp.active) {
-            sp.active = true;
-            sp.x = boltPtsX[i];
-            sp.y = boltPtsY[i];
-            var speed = 16 + Math.random() * 26;
-            sp.vx = ptScratch.nx * speed + (Math.random() - 0.5) * 18;
-            sp.vy = ptScratch.ny * speed + (Math.random() - 0.5) * 18;
-            sp.life = 0;
-            sp.maxLife = 0.24 + Math.random() * 0.26;
-            sp.size = 1.1 + Math.random() * 1.4;
-            break;
-          }
-        }
+      if (i === steps) {
+        headNx = ptScratch.nx;
+        headNy = ptScratch.ny;
+      }
+
+      if (spawnSparks && i > 1 && i < steps - 1 && Math.random() < (perfTier === 'ultra' ? 0.055 : 0.032)) {
+        emitSparkFromPoint(slot, boltPtsX[i], boltPtsY[i], ptScratch.nx, ptScratch.ny, slot.flashAmp > 0.6);
       }
     }
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Pass 1: Soft outer amber aura (replaces expensive GPU shadowBlur!)
+    // Pass 1: Soft outer amber aura (fast multi-stroke alternative to shadowBlur)
     ctx.beginPath();
     ctx.moveTo(boltPtsX[0], boltPtsY[0]);
     for (var p1 = 1; p1 <= steps; p1++) {
       ctx.lineTo(boltPtsX[p1], boltPtsY[p1]);
     }
-    ctx.strokeStyle = 'rgba(245, 158, 11, ' + (0.24 * alpha).toFixed(3) + ')';
+    ctx.strokeStyle = 'rgba(245, 158, 11, ' + (0.22 * alpha).toFixed(3) + ')';
     ctx.lineWidth = 6.5;
     ctx.stroke();
 
-    // Pass 2: Vibrant metallic gold body
-    ctx.strokeStyle = 'rgba(251, 191, 36, ' + (0.72 * alpha).toFixed(3) + ')';
-    ctx.lineWidth = 2.4;
+    // Pass 2: Rich metallic gold arc body
+    ctx.strokeStyle = 'rgba(251, 191, 36, ' + (0.74 * alpha).toFixed(3) + ')';
+    ctx.lineWidth = 2.35;
     ctx.stroke();
 
-    // Pass 3: White-gold electric filament core
+    // Pass 3: Bright white-gold electric core
     ctx.strokeStyle = 'rgba(254, 249, 195, ' + (0.96 * alpha).toFixed(3) + ')';
-    ctx.lineWidth = 1.15;
+    ctx.lineWidth = 1.1;
     ctx.stroke();
 
-    // Micro fork branch on strong flash
-    if (alpha > 0.45 && slot.flashAmp > 0.55) {
+    // Traveling golden electric flash node at the moving head of the arc
+    var hx = boltPtsX[steps];
+    var hy = boltPtsY[steps];
+    var flashScale = 0.7 + 0.55 * slot.flashAmp;
+    ctx.fillStyle = 'rgba(251, 191, 36, ' + (0.34 * alpha).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.arc(hx, hy, 5.2 * flashScale, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(254, 249, 195, ' + (0.92 * alpha).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.arc(hx, hy, 1.9 * flashScale, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (spawnSparks && slot.flashAmp > 0.62 && Math.random() < 0.24) {
+      emitSparkFromPoint(slot, hx, hy, headNx, headNy, true);
+    }
+
+    // Subtle organic fork filament during higher flash pulses
+    if (alpha > 0.42 && slot.flashAmp > 0.52) {
       var forkIdx = Math.floor(steps * 0.48);
       var fx = boltPtsX[forkIdx];
       var fy = boltPtsY[forkIdx];
-      var ang = Math.atan2(boltPtsY[forkIdx + 1] - fy, boltPtsX[forkIdx + 1] - fx) + (seedOffset % 2 === 0 ? 0.65 : -0.65);
-      var midX = fx + Math.cos(ang) * 7.5;
-      var midY = fy + Math.sin(ang) * 7.5;
-      var endX = midX + Math.cos(ang + (Math.random() - 0.5) * 0.7) * 6.5;
-      var endY = midY + Math.sin(ang + (Math.random() - 0.5) * 0.7) * 6.5;
+      var ang =
+        Math.atan2(boltPtsY[forkIdx + 1] - fy, boltPtsX[forkIdx + 1] - fx) +
+        (seedOffset % 2 === 0 ? 0.62 : -0.62);
+      var midX = fx + Math.cos(ang) * 7.2;
+      var midY = fy + Math.sin(ang) * 7.2;
+      var endX = midX + Math.cos(ang + (Math.random() - 0.5) * 0.6) * 6.0;
+      var endY = midY + Math.sin(ang + (Math.random() - 0.5) * 0.6) * 6.0;
 
       ctx.beginPath();
       ctx.moveTo(fx, fy);
       ctx.lineTo(midX, midY);
       ctx.lineTo(endX, endY);
       ctx.strokeStyle = 'rgba(253, 224, 71, ' + (0.68 * alpha).toFixed(3) + ')';
-      ctx.lineWidth = 1.25;
+      ctx.lineWidth = 1.2;
       ctx.stroke();
     }
   }
@@ -451,9 +551,8 @@
       return false;
     }
 
-    // Smooth opacity approach
-    var rate = slot.targetOpacity > slot.opacity ? 3.8 : 2.2;
-    slot.opacity += (slot.targetOpacity - slot.opacity) * Math.min(1, dtSec * rate);
+    var opacityRate = slot.targetOpacity > slot.opacity ? 3.8 : 2.3;
+    slot.opacity += (slot.targetOpacity - slot.opacity) * Math.min(1, dtSec * opacityRate);
 
     if (slot.targetOpacity === 0 && slot.opacity < 0.025) {
       detachSlot(slot);
@@ -467,14 +566,24 @@
 
     ctx.clearRect(0, 0, w, h);
 
-    // Recompute lightning jitter every 78-105ms for natural crackling cadence
-    if (now - slot.lastJitterAt > 86) {
+    // Refresh organic jitter targets periodically and interpolate smoothly each frame
+    if (now - slot.lastJitterAt > 95) {
       slot.lastJitterAt = now;
-      refreshJitterSeeds(slot);
+      refreshJitterTargets(slot);
     }
 
-    slot.arcOffsetA = (slot.arcOffsetA + slot.arcSpeedA * dtSec + 1) % 1;
-    slot.arcOffsetB = (slot.arcOffsetB + slot.arcSpeedB * dtSec + 1) % 1;
+    var lerpAmt = Math.min(1, dtSec * 14);
+    for (var j = 0; j < JITTER_COUNT; j++) {
+      slot.jitterCurr[j] += (slot.jitterTarget[j] - slot.jitterCurr[j]) * lerpAmt;
+    }
+    slot.flashAmp += (slot.flashTarget - slot.flashAmp) * Math.min(1, dtSec * 9);
+
+    // Fluid, non-uniform organic arc velocity around the perimeter
+    var tSec = now * 0.001;
+    var driftA = 0.72 + 0.45 * Math.sin(tSec * 1.45 + slot.phase);
+    var driftB = 0.72 + 0.45 * Math.cos(tSec * 1.18 + slot.phase * 1.3);
+    slot.arcOffsetA = (slot.arcOffsetA + slot.arcSpeedA * driftA * dtSec + 1) % 1;
+    slot.arcOffsetB = (slot.arcOffsetB + slot.arcSpeedB * driftB * dtSec + 1) % 1;
 
     var pad = 10;
     var rectX = pad;
@@ -483,16 +592,14 @@
     var rectH = h - pad * 2;
     var radius = 24;
 
-    var flicker = 0.72 + 0.28 * slot.flashAmp;
+    var flicker = 0.74 + 0.26 * slot.flashAmp;
     var alpha = Math.max(0, Math.min(1, slot.opacity * flicker));
-
     var allowSparks = slot.targetOpacity > 0.5;
-    // Two organic traveling electric arc spans around opposite/staggered sides
+
     drawElectricArcSpan(ctx, slot, rectX, rectY, rectW, rectH, radius, slot.arcOffsetA, 0.34, 0, alpha, allowSparks);
     drawElectricArcSpan(ctx, slot, rectX, rectY, rectW, rectH, radius, slot.arcOffsetB, 0.26, 11, alpha * 0.88, allowSparks);
 
-    // Occasional 3rd brief micro-flash arc on ultra tier
-    if (perfTier === 'ultra' && slot.flashAmp > 0.68) {
+    if (perfTier === 'ultra' && slot.flashAmp > 0.62) {
       drawElectricArcSpan(
         ctx,
         slot,
@@ -509,8 +616,8 @@
       );
     }
 
-    // Update and render golden sparks
-    var maxSparkCount = perfTier === 'ultra' ? MAX_SPARKS : 5;
+    // Update and draw smooth golden micro-trail sparks
+    var maxSparkCount = perfTier === 'ultra' ? MAX_SPARKS : 6;
     for (var i = 0; i < maxSparkCount; i++) {
       var sp = slot.sparks[i];
       if (!sp.active) continue;
@@ -519,24 +626,34 @@
         sp.active = false;
         continue;
       }
+      sp.prevX = sp.x;
+      sp.prevY = sp.y;
       sp.x += sp.vx * dtSec;
       sp.y += sp.vy * dtSec;
-      sp.vx *= 0.94;
-      sp.vy *= 0.94;
+      sp.vx *= 0.93;
+      sp.vy *= 0.93;
 
       var lifeRatio = 1 - sp.life / sp.maxLife;
       var sAlpha = lifeRatio * slot.opacity;
 
-      // Outer spark halo
-      ctx.fillStyle = 'rgba(251, 191, 36, ' + (0.45 * sAlpha).toFixed(3) + ')';
+      // Tiny spark streak
+      ctx.strokeStyle = 'rgba(253, 224, 71, ' + (0.55 * sAlpha).toFixed(3) + ')';
+      ctx.lineWidth = sp.size * 0.85;
       ctx.beginPath();
-      ctx.arc(sp.x, sp.y, sp.size * 2.2, 0, Math.PI * 2);
+      ctx.moveTo(sp.prevX, sp.prevY);
+      ctx.lineTo(sp.x, sp.y);
+      ctx.stroke();
+
+      // Outer spark halo
+      ctx.fillStyle = 'rgba(251, 191, 36, ' + (0.42 * sAlpha).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, sp.size * 2.1, 0, Math.PI * 2);
       ctx.fill();
 
       // Hot spark core
-      ctx.fillStyle = 'rgba(254, 249, 195, ' + (0.95 * sAlpha).toFixed(3) + ')';
+      ctx.fillStyle = 'rgba(254, 249, 195, ' + (0.96 * sAlpha).toFixed(3) + ')';
       ctx.beginPath();
-      ctx.arc(sp.x, sp.y, sp.size * 0.95, 0, Math.PI * 2);
+      ctx.arc(sp.x, sp.y, sp.size * 0.9, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -563,6 +680,20 @@
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
+  var TRANSFER_MIN_MS = 2200;
+  var TRANSFER_MAX_MS = 4300;
+  var TARGET_FPS_ULTRA = 60;
+  var TARGET_FPS_BALANCED = 30;
+
+  function nextRandomTransferDelay() {
+    return TRANSFER_MIN_MS + Math.random() * (TRANSFER_MAX_MS - TRANSFER_MIN_MS);
+  }
+
+  function getTargetFps() {
+    if (perfTier === 'lite') return 0;
+    return perfTier === 'ultra' ? TARGET_FPS_ULTRA : TARGET_FPS_BALANCED;
+  }
+
   function transferElectricEffect(now) {
     var nextCard = pickNextVisibleCard();
     if (!nextCard) {
@@ -570,19 +701,17 @@
         slotPrimary.card.classList.remove('salim-ch-card-energized');
         slotPrimary.targetOpacity = 0;
       }
-      nextTransferAt = now + 1200;
+      nextTransferAt = now + 900;
       return;
     }
 
     if (nextCard === slotPrimary.card) {
-      nextTransferAt = now + 2600 + Math.random() * 1600;
+      nextTransferAt = now + nextRandomTransferDelay();
       return;
     }
 
-    // Move previous primary card cleanly into fading slot (if not already fading)
     if (slotPrimary.card && slotPrimary.card.isConnected) {
       detachSlot(slotFading);
-      // Swap canvas roles cleanly without recreating DOM nodes
       var temp = slotFading;
       slotFading = slotPrimary;
       slotPrimary = temp;
@@ -593,7 +722,6 @@
     }
 
     if (perfTier === 'lite') {
-      // Lite mode: pure CSS energized glow only, no canvas loop
       if (slotFading.card) {
         slotFading.card.classList.remove('salim-ch-card-energized');
         slotFading.card = null;
@@ -604,7 +732,7 @@
       attachSlot(slotPrimary, nextCard);
     }
 
-    nextTransferAt = now + 2400 + Math.random() * 1900;
+    nextTransferAt = now + nextRandomTransferDelay();
   }
 
   function stopElectricLoop() {
@@ -636,15 +764,32 @@
       return;
     }
 
-    var minFrameMs = perfTier === 'ultra' ? 24 : 33; // ~40fps ultra, ~30fps balanced
-    if (now - lastFrameTs >= minFrameMs) {
-      var dtSec = lastFrameTs ? Math.min(0.08, (now - lastFrameTs) / 1000) : 0.033;
+    // Never update cards that scrolled outside the viewport
+    if (slotFading.card && !visibleCards.has(slotFading.card)) {
+      detachSlot(slotFading);
+    }
+    if (slotPrimary.card && !visibleCards.has(slotPrimary.card)) {
+      slotPrimary.card.classList.remove('salim-ch-card-energized');
+      if (visibleCards.size === 0) {
+        detachSlot(slotPrimary);
+      } else {
+        transferElectricEffect(now);
+      }
+    }
+
+    // Suspend rAF completely when 0 cards are visible in the viewport
+    if (visibleCards.size === 0 && !slotPrimary.card && !slotFading.card) {
+      lastFrameTs = 0;
+      return;
+    }
+
+    var targetFps = getTargetFps();
+    var minFrameMs = 1000 / Math.max(30, Math.min(60, targetFps));
+    if (!lastFrameTs || now - lastFrameTs >= minFrameMs - 0.5) {
+      var dtSec = lastFrameTs ? Math.min(0.08, (now - lastFrameTs) / 1000) : minFrameMs / 1000;
       lastFrameTs = now;
 
-      // If energized card left viewport, immediately pick a visible replacement
-      if (slotPrimary.card && !visibleCards.has(slotPrimary.card) && visibleCards.size > 0) {
-        transferElectricEffect(now);
-      } else if (!slotPrimary.card && visibleCards.size > 0) {
+      if (!slotPrimary.card && visibleCards.size > 0) {
         transferElectricEffect(now);
       } else if (now >= nextTransferAt) {
         transferElectricEffect(now);
@@ -654,7 +799,9 @@
       renderSlot(slotPrimary, dtSec, now);
     }
 
-    rafLoopId = requestAnimationFrame(electricTick);
+    if (visibleCards.size > 0 || slotPrimary.card || slotFading.card) {
+      rafLoopId = requestAnimationFrame(electricTick);
+    }
   }
 
   function startElectricEngine() {
@@ -662,10 +809,10 @@
 
     if (perfTier === 'lite') {
       stopElectricLoop();
-      if (!liteIntervalId) {
+      if (!liteIntervalId && visibleCards.size > 0) {
         transferElectricEffect(performance.now());
         liteIntervalId = setInterval(function () {
-          if (stagePresent && !document.hidden) {
+          if (stagePresent && !document.hidden && visibleCards.size > 0) {
             transferElectricEffect(performance.now());
           }
         }, 3200);
@@ -674,10 +821,10 @@
     }
 
     stopLiteLoop();
-    if (!rafLoopId) {
+    if (!rafLoopId && (visibleCards.size > 0 || slotPrimary.card || slotFading.card)) {
       lastFrameTs = 0;
       if (!nextTransferAt) {
-        nextTransferAt = performance.now() + 260;
+        nextTransferAt = performance.now() + 240;
       }
       rafLoopId = requestAnimationFrame(electricTick);
     }
@@ -687,6 +834,7 @@
     var grid = document.querySelector('.salim-channels-grid');
     if (!grid) {
       visibleCards.clear();
+      observedGrid = null;
       return;
     }
 
@@ -701,17 +849,32 @@
               visibleCards.delete(entry.target);
             }
           }
+          if (stagePresent && !document.hidden) {
+            if (visibleCards.size > 0) {
+              startElectricEngine();
+            } else if (slotPrimary.card && !visibleCards.has(slotPrimary.card)) {
+              detachSlot(slotPrimary);
+            }
+          }
         },
-        { threshold: 0.2 }
+        { threshold: 0.15 }
       );
-    } else {
-      cardObserver.disconnect();
-      visibleCards.clear();
     }
+
+    // Prune disconnected cards without wiping currently visible ones
+    visibleCards.forEach(function (c) {
+      if (!c.isConnected) {
+        visibleCards.delete(c);
+      }
+    });
 
     var cards = grid.querySelectorAll('.salim-ch-card[data-salim-ch-id]');
     for (var i = 0; i < cards.length; i++) {
-      cardObserver.observe(cards[i]);
+      var card = cards[i];
+      if (!observedCards || !observedCards.has(card)) {
+        if (observedCards) observedCards.add(card);
+        cardObserver.observe(card);
+      }
     }
 
     if (!gridResizeObserver && typeof ResizeObserver === 'function') {
@@ -720,9 +883,10 @@
         if (slotFading.card) syncCanvasSize(slotFading);
       });
     }
-    if (gridResizeObserver) {
+    if (gridResizeObserver && observedGrid !== grid) {
       gridResizeObserver.disconnect();
       gridResizeObserver.observe(grid);
+      observedGrid = grid;
     }
   }
 
@@ -740,6 +904,8 @@
       stagePresent = nextPresent;
       if (!stagePresent) {
         visibleCards.clear();
+        observedGrid = null;
+        observedCards = typeof WeakSet === 'function' ? new WeakSet() : null;
         if (cardObserver) cardObserver.disconnect();
         if (gridResizeObserver) gridResizeObserver.disconnect();
         stopElectricLoop();
@@ -782,6 +948,24 @@
       startElectricEngine();
     }
   });
+
+  if (typeof window !== 'undefined') {
+    window.__SalimChannelsFx = {
+      getTier: function () {
+        return perfTier;
+      },
+      getTargetFps: getTargetFps,
+      getVisibleCount: function () {
+        return visibleCards.size;
+      },
+      isRunning: function () {
+        return Boolean(rafLoopId || liteIntervalId);
+      },
+      getActiveCardId: function () {
+        return slotPrimary.card ? slotPrimary.card.getAttribute('data-salim-ch-id') : null;
+      }
+    };
+  }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
