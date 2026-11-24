@@ -85,6 +85,7 @@ import {
   getAiAssistantState,
   processOwnerAiChat,
   resetOwnerAiConversation,
+  resolveInteractionAccountsChoice,
   updateDraftItems,
   verifyMainOwnerLive,
 } from './aiAssistant.ts';
@@ -1511,6 +1512,23 @@ apiRouter.post('/ai-assistant/actions/:actionId/confirm', requireMainOwnerSalimJ
     return res.json({ success: true, ...result });
   } catch (err: any) {
     return res.status(400).json({ error: err?.message || 'فشل تنفيذ الإجراء' });
+  }
+});
+
+apiRouter.post('/ai-assistant/actions/:actionId/resolve-accounts', requireMainOwnerSalimJwt, async (req: Request, res: Response) => {
+  try {
+    const mode = req.body?.mode === 'select_existing' ? 'select_existing' : 'create_new';
+    const selectedUserIds = Array.isArray(req.body?.selectedUserIds)
+      ? req.body.selectedUserIds.map((x: unknown) => Number(x)).filter((n: number) => Number.isFinite(n) && n > 0)
+      : undefined;
+    const result = await resolveInteractionAccountsChoice(req.params.actionId, {
+      mode,
+      selectedUserIds,
+      fromChatFlow: false,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'فشل تجهيز حسابات المشاركين' });
   }
 });
 

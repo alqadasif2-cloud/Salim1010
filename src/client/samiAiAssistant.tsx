@@ -48,6 +48,9 @@ interface AiMessage {
 
 interface PersonaDraftItem {
   id: string;
+  userId?: number;
+  username?: string;
+  avatarUrl?: string | null;
   personaName: string;
   dialect: string;
   styleTag: string;
@@ -68,11 +71,28 @@ interface AiDraft {
   updatedAt: number;
 }
 
+interface ExistingAccountOption {
+  id: number;
+  username: string;
+  displayName: string;
+  role: string;
+  avatarUrl?: string | null;
+}
+
 interface PendingAction {
   id: string;
   actionType: string;
   titleAr: string;
   summaryAr: string;
+  payload?: {
+    channelId?: string;
+    channelName?: string;
+    count?: number;
+    topic?: string;
+    intervalSeconds?: number;
+    existingAccounts?: ExistingAccountOption[];
+    [key: string]: any;
+  };
   status: 'pending' | 'executed' | 'cancelled';
   resultMessage?: string | null;
   createdAt: number;
@@ -155,12 +175,12 @@ function formatTimeAr(ts: number): string {
 }
 
 const QUICK_COMMANDS = [
+  'أريد 10 شخصيات يتكلمون عن إدارة رأس المال في القناة العامة',
   'أنشئ 3 حسابات مستخدمين بأسماء يمنية',
   'اعرض قائمة المستخدمين',
   'اعرض كل القنوات المتاحة',
   'توجّه إلى القناة العامة',
   'اقرأ آخر 10 رسائل في القناة العامة',
-  'أنشئ 5 تفاعلات حول صفقة الذهب التي حققت ربحًا قدره 25 دولارًا',
 ];
 
 function formatNavigationLabelAr(nav: NavDirective): string {
@@ -206,6 +226,9 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
+  const [expandedExistingPicker, setExpandedExistingPicker] = useState<Record<string, boolean>>({});
+  const [selectedExistingIds, setSelectedExistingIds] = useState<Record<string, number[]>>({});
+  const [existingSearchQuery, setExistingSearchQuery] = useState<Record<string, string>>({});
 
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -478,6 +501,35 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
     }
   };
 
+  const handleResolveAccountChoice = async (
+    actionId: string,
+    mode: 'create_new' | 'select_existing',
+    userIds?: number[]
+  ) => {
+    setBusyActionId(actionId);
+    setErrorMsg(null);
+    try {
+      const res = await callAiApi(`/actions/${encodeURIComponent(actionId)}/resolve-accounts`, {
+        method: 'POST',
+        body: JSON.stringify({
+          mode,
+          ...(userIds && userIds.length > 0 ? { selectedUserIds: userIds } : {}),
+        }),
+      });
+      setExpandedExistingPicker((prev) => ({ ...prev, [actionId]: false }));
+      onToast?.(
+        mode === 'create_new'
+          ? `تم إنشاء ${res?.createdAccounts?.length || 0} حسابات وتوليد المواضيع باللهجة اليمنية.`
+          : 'تم توليد المواضيع باللهجة اليمنية للحسابات المختارة.'
+      );
+      await loadState();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'تعذر تنفيذ الاختيار المطلوب.');
+    } finally {
+      setBusyActionId(null);
+    }
+  };
+
   const handleResetChat = async () => {
     setConfirmReset(false);
     try {
@@ -647,35 +699,227 @@ export function SamiAiAssistantPanel({ currentUser, onNavigate, onToast }: Props
         </div>
       ) : (
         <>
-          {/* Pending Sensitive Action Confirmation Cards */}
-          {openActions.map((act) => (
-            <div key={act.id} className="rounded-2xl bg-gradient-to-br from-amber-950/40 to-[#0e1526] border-2 border-amber-400/60 p-4 shadow-lg">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-xs sm:text-sm font-black text-amber-300">إجراء إداري بانتظار تأكيدك</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-200 font-bold">{act.actionType}</span>
+          {/* Pending Account-Choice & Sensitive Action Confirmation Cards */}
+          {openActions.map((act) => {
+            if (act.actionType === 'choose_interaction_accounts') {
+              const reqCount = Number(act.payload?.count || 3);
+              const existingList = Array.isArray(act.payload?.existingAccounts)
+                ? act.payload!.existingAccounts
+                : [];
+              const pickerOpen = Boolean(expandedExistingPicker[act.id]);
+              const chosenIds = selectedExistingIds[act.id] || [];
+              const q = String(existingSearchQuery[act.id] || '').trim().toLowerCase();
+              const filteredExisting = q
+                ? existingList.filter(
+                    (u) =>
+                      u.displayName.toLowerCase().includes(q) ||
+                      u.username.toLowerCase().includes(q) ||
+                      String(u.id).includes(q)
+                  )
+                : existingList;
+              const isBusy = busyActionId === act.id;
+
+              return (
+                <div key={act.id} className="rounded-2xl bg-gradient-to-br from-amber-950/45 via-[#0e1526] to-[#0a1324] border-2 border-amber-400/70 p-4 shadow-xl">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <span className="text-xs sm:text-sm font-black text-amber-300">
+                      اختيار حسابات المشاركين قبل التوليد باللهجة اليمنية
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-200 font-bold">
+                      {reqCount} مشاركين • قناة «{act.payload?.channelName}»
+                    </span>
+                  </div>
+                  <div className="text-sm font-bold text-white mb-1">{act.titleAr}</div>
+                  <p className="text-xs text-slate-300 whitespace-pre-wrap mb-3">{act.summaryAr}</p>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => handleResolveAccountChoice(act.id, 'create_new')}
+                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs cursor-pointer disabled:opacity-50 shadow-md"
+                    >
+                      {isBusy ? 'جاري التنفيذ...' : `1️⃣ إنشاء ${reqCount} حسابات جديدة وتوليد باللهجة اليمنية`}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => {
+                        setExpandedExistingPicker((prev) => ({ ...prev, [act.id]: !prev[act.id] }));
+                        if (!selectedExistingIds[act.id] && existingList.length > 0) {
+                          setSelectedExistingIds((prev) => ({
+                            ...prev,
+                            [act.id]: existingList.slice(0, reqCount).map((u) => u.id),
+                          }));
+                        }
+                      }}
+                      className="px-4 py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/50 text-sky-200 font-black text-xs cursor-pointer disabled:opacity-50"
+                    >
+                      {`2️⃣ اختيار من الحسابات الحالية (${existingList.length})`}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => handleCancelAction(act.id)}
+                      className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer disabled:opacity-50"
+                    >
+                      إلغاء
+                    </button>
+                  </div>
+
+                  {pickerOpen && (
+                    <div className="mt-3 rounded-xl bg-[#070b15] border border-sky-500/35 p-3 flex flex-col gap-2.5">
+                      {existingList.length === 0 ? (
+                        <div className="text-xs text-amber-200 leading-relaxed">
+                          لا توجد حسابات أعضاء حالية مسجلة بعد غير حساب المالك. اضغط على زر «إنشاء {reqCount} حسابات جديدة» لإنشائها تلقائياً ثم توليد المواضيع باللهجة اليمنية.
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-sky-200">
+                              اختر الحسابات ({chosenIds.length} محددة من أصل {existingList.length} متاح):
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedExistingIds((prev) => ({
+                                    ...prev,
+                                    [act.id]: existingList.slice(0, reqCount).map((u) => u.id),
+                                  }))
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-200 text-[10.5px] font-bold cursor-pointer"
+                              >
+                                تحديد {Math.min(reqCount, existingList.length)} تلقائياً
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedExistingIds((prev) => ({
+                                    ...prev,
+                                    [act.id]: existingList.map((u) => u.id),
+                                  }))
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10.5px] font-bold cursor-pointer"
+                              >
+                                تحديد الكل
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedExistingIds((prev) => ({
+                                    ...prev,
+                                    [act.id]: [],
+                                  }))
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-[10.5px] font-bold cursor-pointer"
+                              >
+                                مسح التحديد
+                              </button>
+                            </div>
+                          </div>
+
+                          {existingList.length > 6 && (
+                            <input
+                              type="text"
+                              value={existingSearchQuery[act.id] || ''}
+                              onChange={(e) =>
+                                setExistingSearchQuery((prev) => ({ ...prev, [act.id]: e.target.value }))
+                              }
+                              placeholder="ابحث بالاسم أو @username..."
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs outline-none focus:border-sky-400"
+                            />
+                          )}
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                            {filteredExisting.map((acc) => {
+                              const checked = chosenIds.includes(acc.id);
+                              return (
+                                <label
+                                  key={acc.id}
+                                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors ${
+                                    checked
+                                      ? 'bg-sky-500/20 border-sky-400/60 text-white'
+                                      : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/80'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => {
+                                      setSelectedExistingIds((prev) => {
+                                        const cur = prev[act.id] || [];
+                                        const next = cur.includes(acc.id)
+                                          ? cur.filter((id) => id !== acc.id)
+                                          : [...cur, acc.id];
+                                        return { ...prev, [act.id]: next };
+                                      });
+                                    }}
+                                    className="accent-amber-400"
+                                  />
+                                  <span className="font-bold truncate">{acc.displayName}</span>
+                                  <span className="text-[10px] text-slate-400 font-mono mr-auto" dir="ltr">
+                                    @{acc.username}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                            <span className="text-[11px] text-slate-400">
+                              {chosenIds.length < reqCount && existingList.length < reqCount
+                                ? `تنبيه: المتاح حالياً ${existingList.length} حساب فقط؛ سيتم التوليد للحسابات المحددة.`
+                                : `سيتم توليد ${chosenIds.length} تفاعلات باللهجة اليمنية بأسماء الحسابات المحددة.`}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={isBusy || chosenIds.length === 0}
+                              onClick={() => handleResolveAccountChoice(act.id, 'select_existing', chosenIds)}
+                              className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs cursor-pointer disabled:opacity-40"
+                            >
+                              {isBusy ? 'جاري التوليد...' : `توليد المواضيع باللهجة اليمنية (${chosenIds.length})`}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            return (
+              <div key={act.id} className="rounded-2xl bg-gradient-to-br from-amber-950/40 to-[#0e1526] border-2 border-amber-400/60 p-4 shadow-lg">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-xs sm:text-sm font-black text-amber-300">إجراء إداري بانتظار تأكيدك</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-200 font-bold">{act.actionType}</span>
+                </div>
+                <div className="text-sm font-bold text-white mb-1">{act.titleAr}</div>
+                <p className="text-xs text-slate-300 whitespace-pre-wrap mb-3">{act.summaryAr}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busyActionId === act.id}
+                    onClick={() => handleConfirmAction(act.id)}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs cursor-pointer disabled:opacity-50"
+                  >
+                    {busyActionId === act.id ? 'جاري التنفيذ...' : 'تأكيد وتنفيذ الآن'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busyActionId === act.id}
+                    onClick={() => handleCancelAction(act.id)}
+                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer disabled:opacity-50"
+                  >
+                    إلغاء
+                  </button>
+                </div>
               </div>
-              <div className="text-sm font-bold text-white mb-1">{act.titleAr}</div>
-              <p className="text-xs text-slate-300 whitespace-pre-wrap mb-3">{act.summaryAr}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={busyActionId === act.id}
-                  onClick={() => handleConfirmAction(act.id)}
-                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs cursor-pointer disabled:opacity-50"
-                >
-                  {busyActionId === act.id ? 'جاري التنفيذ...' : 'تأكيد وتنفيذ الآن'}
-                </button>
-                <button
-                  type="button"
-                  disabled={busyActionId === act.id}
-                  onClick={() => handleCancelAction(act.id)}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer disabled:opacity-50"
-                >
-                  إلغاء
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
 
           {/* Live Staggered Publishing Progress Cards */}
           {publishingDrafts.map((draft) => {

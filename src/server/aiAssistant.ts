@@ -149,6 +149,9 @@ export interface AiAssistantMessage {
 
 export interface VirtualPersonaDraftItem {
   id: string;
+  userId?: number;
+  username?: string;
+  avatarUrl?: string | null;
   personaName: string;
   dialect: string;
   styleTag: string;
@@ -191,7 +194,8 @@ export interface AiAssistantPendingAction {
     | 'delete_channel'
     | 'manage_channel_members'
     | 'manage_user'
-    | 'pin_channel_message';
+    | 'pin_channel_message'
+    | 'choose_interaction_accounts';
   titleAr: string;
   summaryAr: string;
   payload: Record<string, any>;
@@ -708,13 +712,27 @@ async function resolveUserTarget(userQueryOrId: string | number): Promise<{ id: 
   return partial || null;
 }
 
+export interface SelectedAccountForDraft {
+  id: number;
+  username: string;
+  displayName: string;
+  avatarUrl?: string | null;
+}
+
 async function generateDiverseVirtualPersonasWithEngine(params: {
   topic: string;
   count: number;
   channelName: string;
   recentMessagesSample: string[];
+  selectedAccounts?: SelectedAccountForDraft[];
 }): Promise<{ items: VirtualPersonaDraftItem[]; engineUsed: 'gemini' | 'internal' }> {
-  const safeCount = Math.max(1, Math.min(30, Math.floor(Number(params.count) || 3)));
+  const fixedAccounts =
+    Array.isArray(params.selectedAccounts) && params.selectedAccounts.length > 0
+      ? params.selectedAccounts
+      : null;
+  const safeCount = fixedAccounts
+    ? fixedAccounts.length
+    : Math.max(1, Math.min(30, Math.floor(Number(params.count) || 3)));
   const users = await getAllUsersList();
   const realNamesSet = new Set<string>();
   for (const u of users) {
@@ -728,28 +746,34 @@ async function generateDiverseVirtualPersonasWithEngine(params: {
         ? `\nأمثلة من آخر رسائل القناة للانسجام مع السياق (لا تنسخها):\n- ${params.recentMessagesSample.slice(-8).join('\n- ')}`
         : '';
 
-    const forbiddenNames = Array.from(realNamesSet).slice(0, 60).join('، ');
+    const fixedNamesBlock = fixedAccounts
+      ? `\nالأسماء الحقيقية المعتمدة للمشاركين (${fixedAccounts.length} أعضاء — التزم بها بالترتيب وبدون تغيير):\n${fixedAccounts
+          .map((a, idx) => `${idx + 1}. ${a.displayName}`)
+          .join('\n')}`
+      : `\nيُمنع تماماً استخدام أي اسم متكرر، ويُمنع استخدام الأسماء الحقيقية التالية الموجودة في التطبيق: ${Array.from(realNamesSet).slice(0, 60).join('، ') || 'لا يوجد'}.`;
 
     const prompt = `
-أنت محرك توليد تفاعلات وحوارات واقعية ومتنوعة لشخصيات يمنية في مجتمع تداول يديره القائد «سليم» (Salim).
-المطلوب: إعداد بالضبط ${safeCount} شخصيات يمنية افتراضية مختلفة، ولكل شخصية رسالة واحدة فريدة موجهة للقناة «${params.channelName}» حول الموضوع التالي:
+أنت محرك توليد تفاعلات وحوارات واقعية ومتنوعة لأعضاء يمنيين في مجتمع تداول يديره القائد «سليم» (Salim).
+المطلوب: إعداد بالضبط ${safeCount} رسالة/تفاعل مختلفة موجهة للقناة «${params.channelName}» حول الموضوع التالي:
 "${params.topic}"
 ${sampleBlock}
+${fixedNamesBlock}
 
 شروط صارمة للتنوع والأصالة اليمنية والحوار الطبيعي (لا تخالف أياً منها):
-1. الأسماء اليمنية: اختر ${safeCount} أسماء يمنية واقعية ومتنوعة (ثنائية أو كُنى/ألقاب يمنية مألوفة ذكوراً وإناثاً مثل: أبو حمير، قاسم الحميري، بلقيس اليافعي، عبده القدسي، وضاح الأغبري، أروى الصنعاني، ماهر العولقي، سمية الحضرمي، غمدان المقطري، نشوان السقاف، سوسن العدني، مختار الذماري، نبيل الإرياني، أمل الكميم، صقر الشبواني، طه الشرجبي، رضوان التهامي، هدى البيضاني). يُمنع تماماً استخدام أي اسم متكرر، ويُمنع استخدام الأسماء الحقيقية التالية الموجودة في التطبيق: ${forbiddenNames || 'لا يوجد'}.
-2. تنوع اللهجات والأساليب اليمنية: اجعل جميع الشخصيات تتحدث بروح يمنية أصيلة ووزّع الرسائل بين اللهجات والأساليب اليمنية المتنوعة:
-   - صنعاني (مثل: ما شاء الله تبارك الله، الله يفتح عليك، سلمت يمناك، حيّا الله القائد، ربنا يبارك في رزقك، شغلك مرتب)
-   - عدني (مثل: يا سلام عليك، والله شغل فنان، ربنا يوفقنا جميعاً، تسلم يا غالي، تمام التمام، ما قصرت يا كابتن)
-   - تعزي / إبّي (مثل: ما شاء الله تبارك الرحمن، كفو يا سليم، الله يزيدك من فضله، خطوة قوية ومرتبة، بيّض الله وجهك)
-   - حضرمي / شبواني / يافعي (مثل: بارك الله فيك، الله يرزقنا وإياكم الخير، تحليل طيب ومبارك، ما قصرت يا أبو سليم)
+1. الأسماء: ${fixedAccounts ? 'استخدم الأسماء المعتمدة المذكورة أعلاه بالضبط لكل رسالة بالترتيب.' : `اختر ${safeCount} أسماء يمنية واقعية ومتنوعة (ذكوراً وإناثاً).`}
+2. تنوع اللهجات والأساليب اليمنية: اجعل جميع المشاركين يتحدثون باللهجة اليمنية الأصيلة ووزّع الرسائل بين اللهجات والأساليب اليمنية المتنوعة:
+   - صنعاني (مثل: حيّا الله القائد، ما شاء الله تبارك الله، الله يفتح عليك، سلمت يمناك، شغلك مرتب)
+   - عدني (مثل: يا سلام عليك، والله شغل فنان، ربنا يوفقنا جميعاً، تسلم يا غالي، تمام التمام)
+   - تعزي / إبّي (مثل: ما شاء الله تبارك الرحمن، كفو يا سليم، الله يزيدك من فضله، خطوة قوية ومرتبة)
+   - حضرمي / شبواني / يافعي (مثل: بارك الله فيك، الله يرزقنا وإياكم الخير، طرح طيب ومبارك)
    - فصحى طبيعية خفيفة بروح يمنية ودعاء صادق
    يُمنع استخدام لهجات غير يمنية (لا تستخدم مصري أو شامي أو عراقي أو خليجي مصطنع).
-3. الترابط والحوار الحي بين الشخصيات: عندما يكون العدد 2 فأكثر، اجعل الرسائل تبدو كنقاش وتفاعل طبيعي مترابط داخل القناة وليس جملاً منفصلة مكررة؛ بحيث تتفاعل الأولى مع الموضوع أو سياق القناة، وتتجاوب الشخصيات التالية مع الموضوع أو تبني على كلام من قبلها بعفوية (مثل: إبداء الإعجاب بزاوية معينة، طرح سؤال سريع طبيعي، أو تأكيد نقطة واقعية بأسلوب يمني مختلف).
-4. تفاوت الطول والتركيب: اجعل بعض الرسائل قصيرة جداً (3-6 كلمات) وبعضها متوسطة (7-14 كلمة) وبعضها بجملتين قصيرتين (15-24 كلمة). نوّع في علامات الترقيم والإيموجي (بعضها بدون إيموجي، بعضها بإيموجي خفيف واحد أو اثنين، ولا تكرر نفس الشكل في الكل).
-5. منع النسخ والتكرار والعبارات الجاهزة: ممنوع تكرار نفس العبارة الافتتاحية أو الخاتمة عبر أكثر من رسالة (مثلاً لا تبدأ كل الرسائل بـ "شكراً سليم" أو "ما شاء الله"). اجعل كل رسالة تبدو من شخص يمني مختلف فعلاً.
+3. الترابط والحوار الحي بين الأعضاء: عندما يكون العدد 2 فأكثر، اجعل الرسائل تبدو كنقاش وتفاعل طبيعي مترابط داخل القناة وليس جملاً منفصلة مكررة؛ بحيث يتفاعل الأوائل مع الموضوع، ويتجاوب التاليون معه أو يبنون على كلام من قبلهم بعفوية.
+4. تفاوت الطول والتركيب: اجعل بعض الرسائل قصيرة جداً (3-6 كلمات) وبعضها متوسطة (7-14 كلمة) وبعضها بجملتين قصيرتين (15-24 كلمة). نوّع في علامات الترقيم والإيموجي.
+5. منع النسخ والتكرار والعبارات الجاهزة: ممنوع تكرار نفس العبارة الافتتاحية أو الخاتمة عبر أكثر من رسالة.
 6. يُمنع تماماً كتابة أي عبارة تشير إلى الذكاء الاصطناعي أو التوليد الآلي مثل "مولّد بالذكاء الاصطناعي" أو أي وسوم نظامية.
 7. التزم بتفاصيل الموضوع "${params.topic}" بصدق دون اختلاق أرقام لم ترد فيه.
+8. تنفيذ الطلبات والأفعال المباشرة: إذا كان الموضوع يصف طلباً أو سؤالاً أو شكراً يوجّهه الأعضاء (مثل: "يطلبو من سليم يرسل صفقات" أو "تتطلب من سليم كذا" أو "يسألو عن كذا" أو "يشكرو سليم")، اكتب رسائلهم كتنفيذ مباشر وحقيقي لهذا الطلب أو السؤال بصيغ يمنية عفوية ومتنوعة (مثلاً: "نحتاج صفقات لو سمحت يا سليم"، "أرسلنا صفقات اليوم يا قايد"، "بالله شوف لنا صفقات جديدة يا أبو سليم"...) ولا تتحدث عن الطلب بصفة الغائب أو كموضوع نظري.
 `;
 
     try {
@@ -763,10 +787,10 @@ ${sampleBlock}
             items: {
               type: Type.OBJECT,
               properties: {
-                personaName: { type: Type.STRING, description: 'الاسم الظاهر للشخصية الافتراضية اليمنية' },
-                dialect: { type: Type.STRING, description: 'اللهجة اليمنية أو الأسلوب مثل: صنعاني، عدني، تعزي، حضرمي، إبّي، يافعي، فصحى يمنية' },
+                personaName: { type: Type.STRING, description: 'الاسم الظاهر للعضو اليمني' },
+                dialect: { type: Type.STRING, description: 'اللهجة اليمنية مثل: صنعاني، عدني، تعزي، حضرمي، إبّي، يافعي، فصحى يمنية' },
                 styleTag: { type: Type.STRING, description: 'وصف قصير لطول ونبرة الرسالة' },
-                text: { type: Type.STRING, description: 'نص رسالة التفاعل باللهجة أو الروح اليمنية' },
+                text: { type: Type.STRING, description: 'نص رسالة التفاعل باللهجة اليمنية' },
               },
               required: ['personaName', 'dialect', 'styleTag', 'text'],
             },
@@ -797,20 +821,25 @@ ${sampleBlock}
         const items: VirtualPersonaDraftItem[] = [];
         for (let i = 0; i < parsed.length && items.length < safeCount; i++) {
           const row = parsed[i] || {};
-          let name = sanitizeNoBannedAiDisclaimer(String(row.personaName || `متابع يمني ${i + 1}`)).slice(0, 48).trim();
+          const boundAccount = fixedAccounts ? fixedAccounts[items.length] : undefined;
+          let name = boundAccount
+            ? boundAccount.displayName
+            : sanitizeNoBannedAiDisclaimer(String(row.personaName || `متابع يمني ${i + 1}`)).slice(0, 48).trim();
           if (!name) name = `متداول يمني ${i + 1}`;
 
-          let normName = normalizeArabicForMatch(name);
-          if (usedNames.has(normName)) {
-            const suf = fallbackSuffixes[i % fallbackSuffixes.length];
-            name = `${name} ${suf}`.slice(0, 48);
-            normName = normalizeArabicForMatch(name);
+          if (!boundAccount) {
+            let normName = normalizeArabicForMatch(name);
             if (usedNames.has(normName)) {
-              name = `${name} ${i + 11}`;
+              const suf = fallbackSuffixes[i % fallbackSuffixes.length];
+              name = `${name} ${suf}`.slice(0, 48);
               normName = normalizeArabicForMatch(name);
+              if (usedNames.has(normName)) {
+                name = `${name} ${i + 11}`;
+                normName = normalizeArabicForMatch(name);
+              }
             }
+            usedNames.add(normName);
           }
-          usedNames.add(normName);
 
           const text = sanitizeNoBannedAiDisclaimer(String(row.text || '')).slice(0, 500).trim();
           const normText = normalizeArabicForMatch(text);
@@ -818,7 +847,14 @@ ${sampleBlock}
           usedTexts.add(normText);
 
           items.push({
-            id: `vp_${i + 1}_${crypto.randomBytes(3).toString('hex')}`,
+            id: `vp_${items.length + 1}_${crypto.randomBytes(3).toString('hex')}`,
+            ...(boundAccount
+              ? {
+                  userId: boundAccount.id,
+                  username: boundAccount.username,
+                  avatarUrl: boundAccount.avatarUrl || null,
+                }
+              : {}),
             personaName: name,
             dialect: String(row.dialect || 'يمني').slice(0, 40),
             styleTag: String(row.styleTag || 'متنوع').slice(0, 60),
@@ -828,14 +864,31 @@ ${sampleBlock}
 
         if (items.length > 0) {
           if (items.length < safeCount) {
+            const remainingFixed = fixedAccounts
+              ? fixedAccounts.slice(items.length).map((a) => ({ name: a.displayName }))
+              : undefined;
             const topUp = generateInternalYemeniPersonas({
               topic: params.topic,
               count: safeCount - items.length,
               channelName: params.channelName,
               recentMessagesSample: [...params.recentMessagesSample, ...items.map((x) => x.text)],
               realNamesNormSet: usedNames,
+              fixedPersonas: remainingFixed,
             });
-            items.push(...topUp);
+            topUp.forEach((tp, idx) => {
+              const bound = fixedAccounts ? fixedAccounts[items.length + idx] : undefined;
+              items.push({
+                ...tp,
+                ...(bound
+                  ? {
+                      userId: bound.id,
+                      username: bound.username,
+                      avatarUrl: bound.avatarUrl || null,
+                      personaName: bound.displayName,
+                    }
+                  : {}),
+              });
+            });
           }
           return { items: items.slice(0, safeCount), engineUsed: 'gemini' };
         }
@@ -852,6 +905,18 @@ ${sampleBlock}
     channelName: params.channelName,
     recentMessagesSample: params.recentMessagesSample,
     realNamesNormSet: realNamesSet,
+    fixedPersonas: fixedAccounts ? fixedAccounts.map((a) => ({ name: a.displayName })) : undefined,
+  }).map((it, idx) => {
+    const bound = fixedAccounts ? fixedAccounts[idx] : undefined;
+    return bound
+      ? {
+          ...it,
+          userId: bound.id,
+          username: bound.username,
+          avatarUrl: bound.avatarUrl || null,
+          personaName: bound.displayName,
+        }
+      : it;
   });
   return { items: internalItems, engineUsed: 'internal' };
 }
@@ -933,7 +998,7 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'prepare_virtual_persona_interactions',
     description:
-      'إعداد مسودة تفاعلات متعددة بشخصيات يمنية افتراضية متنوعة ومتباينة اللهجة اليمنية والطول لعرضها على المالك للمراجعة والاعتماد قبل النشر، مع إمكانية تحديد فاصل زمني بالثواني بين كل رسالة.',
+      'بدء إعداد تفاعلات أو حوار بين عدة مشاركين حول موضوع محدد في قناة معينة: يعرض للمالك خيارين (إنشاء حسابات جديدة أو اختيار من الحسابات الحالية) قبل توليد النصوص باللهجة اليمنية، أو ينفذ التوليد مباشرة إذا حدد المالك الخيار صراحة.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -943,18 +1008,42 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
         },
         count: {
           type: Type.NUMBER,
-          description: 'عدد التفاعلات والشخصيات المطلوب إعدادها (بين 1 و 30).',
+          description: 'عدد المشاركين والتفاعلات المطلوب إعدادها (بين 1 و 30).',
         },
         topic: {
           type: Type.STRING,
-          description: 'موضوع التفاعلات أو الصفقة أو الإنجاز المطلوب التفاعل حوله.',
+          description: 'الموضوع أو الطلب الذي ستتحدث عنه أو تطلبه الشخصيات حرفياً (مثل: "يطلبون من سليم إرسال صفقات" أو "إدارة رأس المال").',
         },
         intervalSeconds: {
           type: Type.NUMBER,
-          description: 'الفاصل الزمني بالثواني بين كل رسالة شخصية وأخرى عند النشر (مثلاً 30 أو 60، أو 0 للإرسال الفوري دفعة واحدة).',
+          description: 'الفاصل الزمني بالثواني بين كل رسالة وأخرى عند النشر (مثلاً 30 أو 60، أو 0 للإرسال الفوري).',
+        },
+        accountMode: {
+          type: Type.STRING,
+          description: 'ask (الافتراضي: لعرض الخيارين للمالك) أو create_new أو select_existing إذا حدده المالك صراحة.',
         },
       },
       required: ['count', 'topic'],
+    },
+  },
+  {
+    name: 'resolve_interaction_accounts',
+    description:
+      'تنفيذ اختيار المالك لطلب التفاعلات المعلق: إما إنشاء حسابات جديدة (create_new) أو اختيار من الحسابات الحالية (select_existing)، ثم توليد المواضيع والرسائل باللهجة اليمنية بأسمائهم.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        mode: {
+          type: Type.STRING,
+          description: 'create_new لإنشاء حسابات جديدة، أو select_existing لاختيار حسابات حالية.',
+        },
+        selectedUserIds: {
+          type: Type.ARRAY,
+          items: { type: Type.NUMBER },
+          description: 'معرفات الحسابات الحالية المختارة عند mode=select_existing (اختياري).',
+        },
+      },
+      required: ['mode'],
     },
   },
   {
@@ -1170,11 +1259,12 @@ function buildSystemInstruction(thread: AiAssistantThread, openDraft: AiAssistan
    - اعرض للمالك تفاصيل الحسابات وبيانات الدخول التي أرجعتها الأداة بوضوح.
    - عند طلب تعديل بيانات مستخدم عادي أو حذف حساب غير محمي، يمكنك استخدام update_user_account أو delete_user_account مباشرة.
 4. التزم بالسياق النشط: إذا انتقل المالك لقناة أو قسم في رسالة سابقة ثم قال في رسالة لاحقة "أنشئ تفاعلات" أو "اقرأ الرسائل"، استخدم القناة النشطة في السياق.
-5. الشخصيات الافتراضية والتفاعلات (حماية المراجعة والشفافية):
-   - عند طلب إنشاء تفاعلات أو رسائل متعددة من شخصيات افتراضية، استدعِ الأداة prepare_virtual_persona_interactions لإعداد مسودة بشخصيات يمنية متنوعة وعرضها على المالك سليم للمراجعة والاعتماد أولاً.
-   - إذا حدد المالك وقتاً أو فاصلاً زمنياً بين كل رسالة وأخرى (مثل: "كل 30 ثانية" أو "كل دقيقة")، مرّر قيمة intervalSeconds بالثواني إلى prepare_virtual_persona_interactions أو confirm_pending.
+5. التفاعلات والحوارات باللهجة اليمنية (الاختيار المسبق للحسابات والمراجعة):
+   - عندما يطلب المالك عدداً من الشخصيات أو الأعضاء للتحدث عن موضوع في قناة (مثل: "أريد 10 شخصيات يتكلموا عن موضوع ... في قناة ..."): استدعِ الأداة prepare_virtual_persona_interactions مع accountMode='ask' لعرض خيارين واضحين للمالك أولاً: (1) إنشاء حسابات جديدة، أو (2) اختيار من الحسابات الحالية.
+   - عندما يرد المالك باختيار أحد الخيارين ("إنشاء حسابات جديدة" أو "اختيار من الحسابات الحالية")، استدعِ الأداة resolve_interaction_accounts فوراً لتجهيز الحسابات ثم توليد الرسائل باللهجة اليمنية وعرضها في مسودة للمراجعة والاعتماد.
+   - إذا حدد المالك وقتاً أو فاصلاً زمنياً بين كل رسالة وأخرى (مثل: "كل 30 ثانية" أو "كل دقيقة")، مرّر قيمة intervalSeconds بالثواني.
    - لا تنشر التفاعلات تلقائياً قبل مراجعة المالك وموافقته.
-   - لا تُضف وسم "شخصية افتراضية" بجانب أسماء الشخصيات أو الرسائل المنشورة، واحرص على إظهارها بأسمائها اليمنية الطبيعية فقط.
+   - لا تُضف وسم "شخصية افتراضية" بجانب أسماء الأعضاء أو الرسائل المنشورة، واحرص على إظهارها بأسمائها اليمنية الطبيعية كحسابات أعضاء حقيقيين.
    - يُمنع منعاً باتاً كتابة عبارة "مولّد بالذكاء الاصطناعي" أو ترديدها.
 6. الإجراءات الإدارية للقنوات والرسائل الحساسة (إرسال رسالة قناة/خاصة، إنشاء/تعديل/حذف قناة، إضافة/إزالة عضو، تغيير رتبة مشرف، تثبيت رسالة):
    - استخدم أداة propose_* المناسبة لتجهيز الإجراء وعرض ملخصه الواضح للمالك بانتظار تأكيده الصريح.
@@ -1216,14 +1306,18 @@ function buildVirtualPersonaChannelMessage(
   timestamp: number
 ): ChannelMessage {
   const hashNum = crypto.createHash('md5').update(`${draft.id}:${item.id}:${index}`).digest().readUInt16BE(0);
-  const senderId = 10000 + (hashNum % 89999);
+  const realUserId = Number(item.userId);
+  const senderId =
+    Number.isFinite(realUserId) && realUserId > 0 && realUserId < 9000000
+      ? realUserId
+      : 10000 + (hashNum % 89999);
   return {
     id: `msg_${timestamp}_${index}_${crypto.randomBytes(3).toString('hex')}`,
     channelId,
     senderId,
     senderName: item.personaName,
     senderRole: 'user',
-    senderAvatarUrl: null,
+    senderAvatarUrl: item.avatarUrl || null,
     text: sanitizeNoBannedAiDisclaimer(item.text),
     reactions: {},
     isPinned: false,
@@ -1481,7 +1575,10 @@ export async function updateDraftItems(
   const cleaned: VirtualPersonaDraftItem[] = (Array.isArray(items) ? items : [])
     .map((it, idx) => ({
       id: String(it.id || `vp_${idx + 1}`),
-      personaName: sanitizeNoBannedAiDisclaimer(String(it.personaName || `شخصية يمنية ${idx + 1}`)).slice(0, 60),
+      ...(it.userId && Number(it.userId) > 0 ? { userId: Number(it.userId) } : {}),
+      ...(it.username ? { username: String(it.username).slice(0, 60) } : {}),
+      ...(it.avatarUrl !== undefined ? { avatarUrl: it.avatarUrl || null } : {}),
+      personaName: sanitizeNoBannedAiDisclaimer(String(it.personaName || `عضو يمني ${idx + 1}`)).slice(0, 60),
       dialect: String(it.dialect || 'يمني').slice(0, 40),
       styleTag: String(it.styleTag || 'متنوع').slice(0, 60),
       text: sanitizeNoBannedAiDisclaimer(String(it.text || '')).slice(0, 500),
@@ -1773,6 +1870,293 @@ export async function cancelPendingAction(actionId: string): Promise<AiAssistant
   return next;
 }
 
+async function createInteractionAccountChoicePrompt(params: {
+  channel: ChannelRecord;
+  count: number;
+  topic: string;
+  intervalSeconds: number;
+  commandText: string;
+}): Promise<{
+  action: AiAssistantPendingAction;
+  existingCount: number;
+  replyText: string;
+}> {
+  const store = getAiAssistantDiskStore();
+  const safeCount = Math.max(1, Math.min(30, Math.floor(Number(params.count) || 3)));
+  const allUsers = await getAllUsersList();
+  const eligibleExisting = allUsers
+    .filter((u) => !isProtectedOwnerOrSystemUser(u))
+    .map((u) => ({
+      id: Number(u.id),
+      username: u.username,
+      displayName: u.displayName,
+      role: u.role,
+      avatarUrl: u.avatarUrl || null,
+    }));
+
+  // Cancel any stale unresolved choose_interaction_accounts prompt so UI shows the latest one cleanly
+  for (const prev of Object.values(store.pendingActions || {}) as AiAssistantPendingAction[]) {
+    if (prev && prev.actionType === 'choose_interaction_accounts' && prev.status === 'pending') {
+      prev.status = 'cancelled';
+      prev.resultMessage = 'تم استبداله بطلب أحدث.';
+      prev.updatedAt = Date.now();
+      await tryWriteFirestoreDoc('ai_assistant_pending_actions', prev.id, prev);
+    }
+  }
+
+  const now = Date.now();
+  const action: AiAssistantPendingAction = {
+    id: makeId('aiact'),
+    ownerId: OWNER_ID,
+    ownerUsername: OWNER_USERNAME,
+    actionType: 'choose_interaction_accounts',
+    titleAr: `تجهيز ${safeCount} مشاركين في قناة «${params.channel.name}»`,
+    summaryAr: `الموضوع: "${params.topic}"${params.intervalSeconds > 0 ? ` (بفاصل ${params.intervalSeconds} ثانية)` : ''}\nاختر طريقة تحديد الحسابات قبل توليد التفاعلات باللهجة اليمنية:`,
+    payload: {
+      channelId: params.channel.id,
+      channelName: params.channel.name,
+      count: safeCount,
+      topic: params.topic,
+      intervalSeconds: clampIntervalSeconds(params.intervalSeconds),
+      existingAccounts: eligibleExisting,
+    },
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  store.pendingActions![action.id] = action;
+  saveAiAssistantDiskStore();
+  await tryWriteFirestoreDoc('ai_assistant_pending_actions', action.id, action);
+
+  await updateThreadContext({
+    activeSection: 'channels',
+    activeChannelId: params.channel.id,
+    activeChannelName: params.channel.name,
+  });
+
+  await appendAuditLog({
+    actionType: 'choose_interaction_accounts',
+    command: params.commandText,
+    target: `${params.channel.name} (${params.channel.id})`,
+    status: 'pending',
+    details: `تم عرض خياري الحسابات (إنشاء جديد أو اختيار من الحالية: ${eligibleExisting.length}) لـ ${safeCount} مشاركين حول "${params.topic}".`,
+  });
+
+  const replyText = [
+    `تم تحديد القناة «${params.channel.name}» والموضوع: "${params.topic}" لعدد ${safeCount} مشاركين.`,
+    '',
+    'قبل توليد المواضيع باللهجة اليمنية، اختر إحدى الطريقتين التاليتين (من الأزرار أدناه أو بالرد في المحادثة):',
+    `1️⃣ إنشاء ${safeCount} حسابات جديدة بأسماء يمنية ثم توليد المواضيع باللهجة اليمنية.`,
+    `2️⃣ اختيار من الحسابات الحالية (${eligibleExisting.length} حساب متاح) ثم توليد المواضيع باللهجة اليمنية.`,
+  ].join('\n');
+
+  return { action, existingCount: eligibleExisting.length, replyText };
+}
+
+export async function resolveInteractionAccountsChoice(
+  actionId: string,
+  opts: {
+    mode: 'create_new' | 'select_existing';
+    selectedUserIds?: number[];
+    commandContext?: string;
+    fromChatFlow?: boolean;
+  }
+): Promise<{
+  action: AiAssistantPendingAction;
+  draft: AiAssistantDraft;
+  createdAccounts: CreatedUserCredential[];
+  replyText: string;
+  navigation: AiNavigationDirective;
+  assistantMessage?: AiAssistantMessage;
+}> {
+  const store = getAiAssistantDiskStore();
+  const action = store.pendingActions?.[actionId] as AiAssistantPendingAction | undefined;
+  if (!action || action.actionType !== 'choose_interaction_accounts') {
+    throw new Error('لم يتم العثور على طلب اختيار الحسابات المعلق.');
+  }
+  if (action.status !== 'pending') {
+    throw new Error(action.status === 'executed' ? 'تم تنفيذ هذا الاختيار مسبقاً.' : 'تم إلغاء هذا الطلب.');
+  }
+
+  const p = action.payload || {};
+  const ch = await getChannelById(String(p.channelId || ''));
+  if (!ch) {
+    throw new Error(`القناة المستهدفة (${p.channelName || p.channelId}) لم تعد موجودة.`);
+  }
+
+  const count = Math.max(1, Math.min(30, Math.floor(Number(p.count) || 3)));
+  const topic = String(p.topic || 'موضوع التداول').trim();
+  const intervalSeconds = clampIntervalSeconds(p.intervalSeconds);
+
+  let selectedAccounts: SelectedAccountForDraft[] = [];
+  let createdAccounts: CreatedUserCredential[] = [];
+
+  if (opts.mode === 'create_new') {
+    const batch = await createUsersBatchViaAssistant({ count });
+    if (batch.created.length === 0) {
+      throw new Error(batch.failed[0]?.error || 'تعذر إنشاء الحسابات الجديدة.');
+    }
+    createdAccounts = batch.created;
+    selectedAccounts = batch.created.map((u) => ({
+      id: u.id,
+      username: u.username,
+      displayName: u.displayName,
+      avatarUrl: null,
+    }));
+  } else {
+    const allUsers = await getAllUsersList();
+    const eligible = allUsers.filter((u) => !isProtectedOwnerOrSystemUser(u));
+    if (eligible.length === 0) {
+      throw new Error('لا توجد حسابات أعضاء حالية متاحة للاختيار. يمكنك اختيار «إنشاء حسابات جديدة» بدلاً من ذلك.');
+    }
+
+    const requestedIds = Array.isArray(opts.selectedUserIds)
+      ? opts.selectedUserIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+      : [];
+
+    if (requestedIds.length > 0) {
+      const byId = new Map(eligible.map((u) => [Number(u.id), u]));
+      for (const uid of requestedIds) {
+        const found = byId.get(uid);
+        if (found) {
+          selectedAccounts.push({
+            id: Number(found.id),
+            username: found.username,
+            displayName: found.displayName,
+            avatarUrl: found.avatarUrl || null,
+          });
+        }
+      }
+      if (selectedAccounts.length === 0) {
+        throw new Error('لم يتم العثور على أي حساب صالح ضمن الحسابات المحددة.');
+      }
+    } else {
+      selectedAccounts = eligible.slice(0, count).map((u) => ({
+        id: Number(u.id),
+        username: u.username,
+        displayName: u.displayName,
+        avatarUrl: u.avatarUrl || null,
+      }));
+    }
+  }
+
+  const recentMsgs = await getChannelMessages(ch.id, 10);
+  const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
+
+  const { items } = await generateDiverseVirtualPersonasWithEngine({
+    topic,
+    count: selectedAccounts.length,
+    channelName: ch.name,
+    recentMessagesSample: sampleTexts,
+    selectedAccounts,
+  });
+
+  const now = Date.now();
+  const draft: AiAssistantDraft = {
+    id: makeId('aidraft'),
+    ownerId: OWNER_ID,
+    ownerUsername: OWNER_USERNAME,
+    channelId: ch.id,
+    channelName: ch.name,
+    topic,
+    status: 'pending_approval',
+    items,
+    intervalSeconds,
+    nextPublishAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  store.drafts![draft.id] = draft;
+
+  const resultMessage =
+    opts.mode === 'create_new'
+      ? `تم إنشاء ${createdAccounts.length} حسابات جديدة وتوليد ${items.length} تفاعل باللهجة اليمنية.`
+      : `تم اختيار ${selectedAccounts.length} من الحسابات الحالية وتوليد ${items.length} تفاعل باللهجة اليمنية.`;
+
+  const executedAction: AiAssistantPendingAction = {
+    ...action,
+    status: 'executed',
+    resultMessage,
+    updatedAt: Date.now(),
+  };
+  store.pendingActions![action.id] = executedAction;
+  saveAiAssistantDiskStore();
+
+  await Promise.all([
+    tryWriteFirestoreDoc('ai_assistant_drafts', draft.id, draft),
+    tryWriteFirestoreDoc('ai_assistant_pending_actions', executedAction.id, executedAction),
+  ]);
+
+  await updateThreadContext({
+    activeSection: 'channels',
+    activeChannelId: ch.id,
+    activeChannelName: ch.name,
+  });
+
+  await appendAuditLog({
+    actionType: 'prepare_virtual_personas',
+    command: opts.commandContext || (opts.mode === 'create_new' ? 'إنشاء حسابات جديدة وتوليد باللهجة اليمنية' : 'اختيار حسابات حالية وتوليد باللهجة اليمنية'),
+    target: `${ch.name} (${ch.id})`,
+    status: 'pending',
+    details: `${resultMessage} حول "${topic}" بانتظار اعتماد المالك.`,
+  });
+
+  const namesList = selectedAccounts.slice(0, 10).map((a) => a.displayName).join('، ');
+  const replyText = [
+    opts.mode === 'create_new'
+      ? `تم إنشاء ${createdAccounts.length} حسابات جديدة بصلاحية عضو (user)، وتوليد ${items.length} تفاعلات باللهجة اليمنية حول "${topic}" لقناة «${ch.name}».`
+      : `تم اختيار ${selectedAccounts.length} من الحسابات الحالية (${namesList}${selectedAccounts.length > 10 ? ' ...' : ''}) وتوليد ${items.length} تفاعلات باللهجة اليمنية حول "${topic}" لقناة «${ch.name}».`,
+    'يمكنك الآن مراجعة النصوص وتعديلها أو تحديد فاصل زمني ثم الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».',
+  ].join('\n');
+
+  const navigation: AiNavigationDirective = {
+    tab: 'channels',
+    channelId: ch.id,
+    channelName: ch.name,
+  };
+
+  let assistantMessage: AiAssistantMessage | undefined;
+  if (!opts.fromChatFlow) {
+    assistantMessage = await appendChatMessage({
+      role: 'assistant',
+      text: replyText,
+      toolSteps: [
+        ...(createdAccounts.length > 0
+          ? [
+              {
+                toolName: 'create_user_accounts',
+                labelAr: `إنشاء ${createdAccounts.length} حسابات (user)`,
+                status: 'ok' as const,
+                summaryAr: `تم تسجيل ${createdAccounts.length} حساب فعلي.`,
+              },
+            ]
+          : []),
+        {
+          toolName: 'prepare_virtual_persona_interactions',
+          labelAr: `توليد ${items.length} تفاعلات باللهجة اليمنية`,
+          status: 'pending_confirmation' as const,
+          summaryAr: `جاهزة للمراجعة والاعتماد لقناة «${ch.name}».`,
+        },
+      ],
+      draftId: draft.id,
+      navigation,
+      createdAccounts: createdAccounts.length > 0 ? createdAccounts : null,
+      timestamp: Date.now(),
+    });
+  }
+
+  return {
+    action: executedAction,
+    draft,
+    createdAccounts,
+    replyText,
+    navigation,
+    assistantMessage,
+  };
+}
+
 export async function resetOwnerAiConversation(): Promise<void> {
   const store = getAiAssistantDiskStore();
   const prevMsgs = [...(store.messages || [])];
@@ -1844,7 +2228,6 @@ function parseArabicCount(text: string): number | null {
 
 function parsePersonaInteractionCount(text: string): number | null {
   const ascii = toAsciiDigits(text)
-    // Remove profit/currency/metric numbers and channel suffix digits (e.g. "30 دولارًا", "salim1")
     .replace(/\d+(?:\.\d+)?\s*(?:دولار[اً]?|دولارات|\$|usd|نقطه|نقطة|نقاط|بيب|pips?|%|بالمئه|بالميه|ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق)/gi, ' ')
     .replace(/\$\s*\d+(?:\.\d+)?/g, ' ')
     .replace(/([a-zA-Z])\d+/g, '$1');
@@ -1852,33 +2235,183 @@ function parsePersonaInteractionCount(text: string): number | null {
   const norm = normalizeArabicForMatch(ascii);
 
   // Explicit duals first
-  if (/(?:^|\s)ل?(?:شخصيتين|تفاعلين|ردين|تعليقين)(?=\s|$|[،.])/.test(norm)) {
+  if (/(?:^|\s)ل?(?:شخصيتين|تفاعلين|ردين|تعليقين|مشاركين|عضوين)(?=\s|$|[،.])/.test(norm)) {
     return 2;
   }
 
-  // Digit adjacent to persona/interaction noun
+  // Digit adjacent to persona/interaction noun (also supports no-space like "10شخصيات")
   const digitNoun = norm.match(
-    /(?:^|\s)ل?[ـ]?\s*(\d{1,2})\s*(?:شخصيه|شخصيات|شخصيه افتراضيه|شخصيات افتراضيه|تفاعلات|تفاعل|ردود|رد|تعليقات|تعليق|حوارات|حوار|مشاركات)/
+    /(?:^|\s)ل?[ـ]?\s*(\d{1,2})\s*(?:شخصيه|شخصيات|تفاعلات|تفاعل|ردود|رد|تعليقات|تعليق|حوارات|حوار|مشاركات|مشارك|مشاركين|اعضاء|عضو)/
   );
   if (digitNoun) {
     const n = Number(digitNoun[1]);
     if (n >= 1 && n <= 30) return n;
   }
 
-  // Digit shortly after creation verb
+  // Digit shortly after creation / request verb
   const verbDigit = norm.match(
-    /(?:جهز|حضر|انشئ|اكتب|رتب|صغ|اعمل|سو|سوي|ولد|كون|اقترح|اضف|زيد)(?:\s+لي)?(?:\s+تفاعلات)?\s+(?:ل?[ـ]?\s*)?(\d{1,2})\b/
+    /(?:اريد|ابغي|ابي|جهز|حضر|انشئ|اكتب|رتب|صغ|اعمل|سو|سوي|ولد|كون|اقترح|اضف|زيد)(?:\s+لي)?(?:\s+تفاعلات)?\s+(?:ل?[ـ]?\s*)?(\d{1,2})\b/
   );
   if (verbDigit) {
     const n = Number(verbDigit[1]);
     if (n >= 1 && n <= 30) return n;
   }
 
-  // Arabic number word anywhere in sanitized norm (currency & channel digits already removed)
+  // Arabic number word anywhere in sanitized norm
   const wordCount = parseArabicCount(norm);
   if (wordCount !== null) return wordCount;
 
   return null;
+}
+
+async function parsePersonaDiscussionRequest(asciiInput: string, norm: string): Promise<{
+  isRequest: boolean;
+  count: number;
+  channelQuery: string | null;
+  topic: string;
+  intervalSeconds: number;
+  explicitAccountMode: 'create_new' | 'select_existing' | null;
+} | null> {
+  const hasPersonaOrInteractionNoun =
+    /(?:تفاعل|تفاعلات|تفاعلين|شخصي|شخصيه|شخصيات|شخصيتين|حوار|حوارات|ردود|تعليقات|مشاركين|يتكلم|يتحدث|يتفاعل|يناقش)/.test(norm);
+  const hasVerbOrWant =
+    /(?:اريد|ابغي|ابي|خل|اجعل|يتكلم|يتحدث|يتفاعل|يناقش|يطلب|يطلبو|يطلبوا|تتطلب|تطلب|تطلبو|يسال|يسالو|يشكر|يشكرو|انشئ|انشاء|جهز|حضر|اكتب|رتب|صغ|اعمل|سو|سوي|ولد|كون|اقترح|نظم|ابدا|شغل|اضف)/.test(norm);
+  const isPureAccountRequest =
+    /(?:حساب\s+مستخدم|حسابات\s+مستخدمين|حسابات\s+فعليه|عضو\s+جديد)/.test(norm) &&
+    !/(?:يتكلم|يتحدث|يتفاعل|يناقش|يطلب|تتطلب|تطلب|يسال|يشكر|موضوع|قناه|قناة)/.test(norm);
+  const hasOtherAdminVerb = /(?:احذف|عد[ّ]?ل اسم|غي[ّ]?ر اسم|كلمه مرور|اقرا|اقرأ|اعرض المستخدمين)/.test(norm);
+
+  if (!hasPersonaOrInteractionNoun || !hasVerbOrWant || isPureAccountRequest || hasOtherAdminVerb) {
+    return null;
+  }
+
+  const parsedCount = parsePersonaInteractionCount(asciiInput);
+  const count = parsedCount ?? 3;
+  const intervalSeconds = clampIntervalSeconds(parseIntervalSecondsFromArabic(asciiInput) ?? 0);
+
+  let explicitAccountMode: 'create_new' | 'select_existing' | null = null;
+  if (/(?:انشئ حسابات جديده|انشاء حسابات جديده|بحسابات جديده|حسابات جديده)/.test(norm)) {
+    explicitAccountMode = 'create_new';
+  } else if (/(?:من الحسابات الحاليه|الحسابات الحاليه|الحسابات الموجوده|من الاعضاء الحاليين|بالحسابات الحاليه)/.test(norm)) {
+    explicitAccountMode = 'select_existing';
+  }
+
+  let channelQuery: string | null = null;
+  let workingForTopic = asciiInput;
+
+  const prefixNavMatch = asciiInput.match(
+    /(?:توج[ّ]?ه|اذهب|انتقل|ادخل|روح|افتح)\s+(?:الى|إلى|لـ?|علي|على)?\s*(.+?)\s+(?:و|ثم)\s*/i
+  );
+  if (prefixNavMatch) {
+    channelQuery = prefixNavMatch[1].replace(/^(?:قناه|قناة|غرفه|غرفة|روم)\s+/i, '').trim();
+    workingForTopic = asciiInput.slice(prefixNavMatch[0].length);
+  } else {
+    const channelPrepMatch = asciiInput.match(/(?:في|داخل|لقناة|لقناه|بقناة|بقناه)\s+/i);
+    if (channelPrepMatch && channelPrepMatch.index !== undefined) {
+      const prepStart = channelPrepMatch.index;
+      const afterPrepOffset = prepStart + channelPrepMatch[0].length;
+      const afterPrep = asciiInput.slice(afterPrepOffset);
+
+      // 1. Try matching against actual channel names & known aliases cleanly first
+      const knownChannels = await getChannelsForUser(OWNER_ID, 'owner');
+      const knownChannelPhrases = [
+        'القناة العامة',
+        'القناه العامه',
+        'القناة العامه',
+        'القناه العامة',
+        'الدردشة العامة',
+        'الدردشه العامه',
+        ...knownChannels.map((c) => c.name).filter(Boolean),
+      ]
+        .map((n) => n.trim())
+        .filter((n) => n.length >= 2)
+        .sort((a, b) => b.length - a.length);
+
+      let matchedChannelSpanLen = 0;
+      const afterPrepCleanPrefix = afterPrep.replace(/^(?:قناه|قناة|غرفه|غرفة|روم)\s+/i, '');
+      const prefixDiffLen = afterPrep.length - afterPrepCleanPrefix.length;
+      const normAfterPrefix = normalizeArabicForMatch(afterPrepCleanPrefix);
+
+      for (const phrase of knownChannelPhrases) {
+        const normPhrase = normalizeArabicForMatch(phrase);
+        if (normAfterPrefix.startsWith(normPhrase)) {
+          const nextChar = afterPrepCleanPrefix.slice(phrase.length, phrase.length + 1);
+          if (!nextChar || /\s/.test(nextChar)) {
+            channelQuery = phrase.replace(/^(?:قناه|قناة|غرفه|غرفة|روم)\s+/i, '').trim();
+            matchedChannelSpanLen = prefixDiffLen + phrase.length;
+            break;
+          }
+        }
+      }
+
+      if (matchedChannelSpanLen === 0) {
+        const inChannelMatch = afterPrep.match(
+          /^(?:قناه|قناة|غرفه|غرفة|روم)?\s*(.+?)(?=\s+(?:حول|عن|بخصوص|بشأن|بشان|كل\s+\d|يطلب[و]?ا?|تتطلب|تطلب[و]?ا?|يس[أا]ل[و]?ا?|تس[أا]ل[و]?ا?|يشكر[و]?ا?|تشكر[و]?ا?|يتكلم[و]?ا?|تتكلم|يتحدث[و]?ا?|تتحدث|يتفاعل[و]?ا?|يناقش[و]?ا?|يقول[و]?ا?|تقول|يعلق[و]?ا?|يمدح[و]?ا?|يبارك[و]?ا?|يطالب[و]?ا?|ينصح[و]?ا?|يدع[و]?ا?|و(?:جهز|انشئ|يتكلم|تفاعل|يطلب))|$)/i
+        );
+        if (inChannelMatch) {
+          const candidateCh = inChannelMatch[1].trim();
+          const normCh = normalizeArabicForMatch(candidateCh);
+          if (!/^(?:معينه|محدده|محدد|نفسها|الحاليه|النشطه|هذه)$/.test(normCh)) {
+            channelQuery = candidateCh.replace(/^(?:قناه|قناة|غرفه|غرفة|روم)\s+/i, '').trim();
+          }
+          matchedChannelSpanLen = inChannelMatch[0].length;
+        }
+      }
+
+      if (matchedChannelSpanLen > 0) {
+        workingForTopic = (asciiInput.slice(0, prepStart) + ' ' + asciiInput.slice(afterPrepOffset + matchedChannelSpanLen)).trim();
+      }
+    }
+  }
+
+  workingForTopic = workingForTopic
+    .replace(/كل\s*\d+\s*(?:ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق).*$/i, '')
+    .replace(/(?:بحسابات جديده|من الحسابات الحاليه|الحسابات الحاليه|الحسابات الموجوده).*$/i, '')
+    .replace(/\b(?:باللهجه|باللهجة|بلهجه|بلهجة)\s+(?:اليمنيه|اليمنية|يمنيه|يمنية)\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // Extract direct speech-act phrases (e.g. "يطلبو من سليم يرسل صفقات", "تتطلب من سليم ...", "يشكرو سليم ...")
+  const speechActMatch = workingForTopic.match(
+    /((?:يطلب[و]?ا?|تتطلب|تطلب[و]?ا?|يس[أا]ل[و]?ا?|تس[أا]ل[و]?ا?|يشكر[و]?ا?|تشكر[و]?ا?|يمدح[و]?ا?|تمدح[و]?ا?|يبارك[و]?ا?|تبارك[و]?ا?|يهنئ[و]?ا?|يطالب[و]?ا?|ينصح[و]?ا?|يدع[و]?ا?|يقول[و]?ا?|تقول[و]?ا?|يعلق[و]?ا?|تعلق[و]?ا?|يشجع[و]?ا?)\s+.+)$/i
+  );
+
+  const topicMatch = workingForTopic.match(/(?:حول|عن|بخصوص|بشأن|بشان|لصفقة|لصفقه|بمناسبة|بمناسبه)\s+(.+)$/i);
+
+  let rawTopic = '';
+  if (speechActMatch) {
+    rawTopic = speechActMatch[1].trim();
+  } else if (topicMatch) {
+    rawTopic = topicMatch[1].trim();
+  } else {
+    const residual = workingForTopic
+      .replace(/^(?:اريد|أريد|ابغي|أبغي|ابي|جهز|حض[ّ]?ر|انشئ|أنشئ|اكتب|رتب|اعمل|سو|سوي|ولد|كون|خل|اجعل)\s+(?:لي\s+)?/i, '')
+      .replace(/^(?:ل?[ـ]?\s*)?(?:\d{1,2}\s*)?(?:الشخصيات|شخصيات|شخصيه|شخصية|شخصيتين|اعضاء|أعضاء|الاعضاء|الأعضاء|تفاعلات|تفاعل)\s*/i, '')
+      .replace(/^(?:تتكلم|يتكلم[و]?ا?|تتحدث|يتحدث[و]?ا?|تناقش|يناقش[و]?ا?|تتفاعل|يتفاعل[و]?ا?)\s*/i, '')
+      .trim();
+    if (residual.length >= 3) {
+      rawTopic = residual;
+    }
+  }
+  rawTopic = rawTopic.replace(/^(?:موضوع)\s+/i, '').trim();
+
+  const hasExplicitContext =
+    rawTopic.length >= 2 ||
+    Boolean(channelQuery) ||
+    /(?:توج[ّ]?ه|اذهب|انتقل|في\s+(?:قناه|قناة)|موضوع|يتكلم|يتحدث|يناقش|يطلب|تتطلب|تطلب|يسال|يشكر)/.test(norm);
+
+  if (!hasExplicitContext) {
+    return null;
+  }
+
+  return {
+    isRequest: true,
+    count,
+    channelQuery,
+    topic: rawTopic,
+    intervalSeconds,
+    explicitAccountMode,
+  };
 }
 
 function parseIntervalSecondsFromArabic(text: string): number | undefined {
@@ -1985,8 +2518,92 @@ async function tryExecuteDirectArabicCommand(cleanInput: string, turnStartedAt: 
   const norm = normalizeArabicForMatch(asciiInput);
   const wordsCount = norm.split(/\s+/).filter(Boolean).length;
 
+  // A0. Resolve pending choose_interaction_accounts via text reply (0 Gemini calls)
+  if (prePending.action && prePending.action.actionType === 'choose_interaction_accounts') {
+    const wantsCancelChoice =
+      wordsCount <= 6 && /^(?:الغ|ألغ|الغاء|الغي|رفض|توقف|كنسل)(?:\s+(?:الطلب|العمليه|الاختيار))?[!؟.]*$/.test(norm);
+    const wantsCreateNew =
+      /(?:انشئ|انشاء|حسابات جديده|حساب جديد|جديده|الخيار الاول|الاختيار الاول|الاول)/.test(norm) ||
+      norm === '1';
+    const wantsSelectExisting =
+      !wantsCreateNew &&
+      (/(?:اختيار من الحسابات الحاليه|الحسابات الحاليه|الحسابات الموجوده|من الحسابات الحاليه|من الاعضاء الحاليين|حسابات حاليه|حاليه|الخيار الثاني|الاختيار الثاني|الثاني)/.test(norm) ||
+        norm === '2');
+
+    if (wantsCancelChoice) {
+      const cancelled = await cancelPendingAction(prePending.action.id);
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        replyText: `تم إلغاء طلب تجهيز التفاعلات (${cancelled.titleAr}).`,
+        toolSteps: [
+          {
+            toolName: 'confirm_pending',
+            labelAr: 'إلغاء الطلب',
+            status: 'ok',
+            summaryAr: cancelled.titleAr,
+          },
+        ],
+      });
+    }
+
+    if (wantsCreateNew || wantsSelectExisting) {
+      try {
+        const res = await resolveInteractionAccountsChoice(prePending.action.id, {
+          mode: wantsCreateNew ? 'create_new' : 'select_existing',
+          commandContext: cleanInput,
+          fromChatFlow: true,
+        });
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          draftId: res.draft.id,
+          navigation: res.navigation,
+          createdAccounts: res.createdAccounts,
+          replyText: res.replyText,
+          toolSteps: [
+            ...(res.createdAccounts.length > 0
+              ? [
+                  {
+                    toolName: 'create_user_accounts',
+                    labelAr: `إنشاء ${res.createdAccounts.length} حسابات (user)`,
+                    status: 'ok' as const,
+                    summaryAr: `تم تسجيل ${res.createdAccounts.length} حساب فعلي.`,
+                  },
+                ]
+              : []),
+            {
+              toolName: 'prepare_virtual_persona_interactions',
+              labelAr: `توليد ${res.draft.items.length} تفاعلات باللهجة اليمنية`,
+              status: 'pending_confirmation',
+              summaryAr: `جاهزة للمراجعة لقناة «${res.draft.channelName}».`,
+            },
+          ],
+        });
+      } catch (err: any) {
+        return finalizeDirectReply({
+          cleanInput,
+          turnStartedAt,
+          thread,
+          pendingActionId: prePending.action.id,
+          replyText: err?.message || 'تعذر تنفيذ الاختيار المطلوب.',
+          toolSteps: [
+            {
+              toolName: 'resolve_interaction_accounts',
+              labelAr: 'تحديد حسابات المشاركين',
+              status: 'error',
+              summaryAr: err?.message || 'تعذر التنفيذ.',
+            },
+          ],
+        });
+      }
+    }
+  }
+
   // A. Approve or cancel pending draft/action directly (0 Gemini calls)
-  if (prePending.draft || prePending.action) {
+  if (prePending.draft || (prePending.action && prePending.action.actionType !== 'choose_interaction_accounts')) {
     const isCancelPhrase =
       wordsCount <= 6 &&
       /^(?:الغ|ألغ|الغاء|الغي|رفض|توقف|لا تنشر|لا تنفذ|كنسل)(?:\s+(?:المسوده|الاجراء|العمليه|الكل))?[!؟.]*$/.test(norm);
@@ -2579,121 +3196,92 @@ async function tryExecuteDirectArabicCommand(cleanInput: string, turnStartedAt: 
     }
   }
 
-  // J. Direct Route for Virtual Persona Interactions (uses Gemini when healthy, auto-failover to Internal Yemeni Engine on 429/unavailable)
-  const hasInteractionCreateVerb =
-    /(?:انشئ|انشاء|جهز|حضر|اكتب|رتب|صغ|اعمل|سو|سوي|ولد|كون|اقترح|نظم|ابدا|شغل|اضف)/.test(norm);
-  const hasPersonaOrInteractionNoun =
-    /(?:تفاعل|تفاعلات|تفاعلين|شخصيه|شخصيات|شخصيتين|حوار|حوارات|ردود|تعليقات)/.test(norm);
-  const isAccountRequest = /(?:حساب\s+مستخدم|حسابات\s+مستخدمين|حسابات\s+فعليه|عضو\s+جديد)/.test(norm);
-  const hasAnyOtherAdminVerb = /(?:احذف|عد[ّ]?ل اسم|غي[ّ]?ر اسم|كلمه مرور|اقرا|اقرأ|اعرض المستخدمين)/.test(norm);
+  // J. Direct Route for Yemeni-dialect channel discussion setup (presents Two Options first!)
+  const parsedReq = await parsePersonaDiscussionRequest(asciiInput, norm);
+  if (parsedReq) {
+    let ch = await resolveChannelTarget(parsedReq.channelQuery || (!thread.activeChannelId ? 'القناة العامة' : null), thread);
+    if (!ch && parsedReq.channelQuery) {
+      ch = await resolveChannelTarget('القناة العامة', thread);
+    }
+    if (!ch) {
+      const allChs = await getChannelsForUser(OWNER_ID, 'owner');
+      ch = allChs[0] || null;
+    }
+    if (ch) {
+      const recentMsgs = await getChannelMessages(ch.id, 10);
+      const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
+      const effectiveTopic =
+        parsedReq.topic.length >= 2
+          ? parsedReq.topic
+          : sampleTexts.length > 0
+          ? `التفاعل مع آخر تطورات قناة ${ch.name}`
+          : 'تفاعل إيجابي حول صفقات القناة';
 
-  if (hasInteractionCreateVerb && hasPersonaOrInteractionNoun && !isAccountRequest && !hasAnyOtherAdminVerb) {
-    const parsedCount = parsePersonaInteractionCount(asciiInput);
-    const count = parsedCount ?? 3;
-    const topicMatch = asciiInput.match(/(?:حول|عن|بخصوص|على|بشأن|بشان|لصفقة|لصفقه|بمناسبة|بمناسبه)\s+(.+)$/i);
-    const rawTopic = topicMatch ? topicMatch[1].trim() : '';
+      const promptRes = await createInteractionAccountChoicePrompt({
+        channel: ch,
+        count: parsedReq.count,
+        topic: effectiveTopic,
+        intervalSeconds: parsedReq.intervalSeconds,
+        commandText: cleanInput,
+      });
 
-    if (rawTopic.length >= 2 || thread.activeChannelId || /(?:توج[ّ]?ه|اذهب|انتقل|في\s+(?:قناه|قناة))/.test(norm)) {
-      let requestedChannelQuery: string | null = null;
-      const prefixNavMatch = asciiInput.match(
-        /(?:توج[ّ]?ه|اذهب|انتقل|ادخل|روح|افتح)\s+(?:الى|إلى|لـ?|علي|على)?\s*(.+?)\s+(?:و|ثم)\s*/i
-      );
-      if (prefixNavMatch) {
-        requestedChannelQuery = prefixNavMatch[1].replace(/^(?:قناه|قناة|غرفه|غرفة|روم)\s+/i, '').trim();
-      } else {
-        const inChannelMatch = asciiInput.match(
-          /في\s+(?:قناه|قناة)\s+([^\s،,]+(?:\s+[^\s،,]+)?)(?:\s+(?:حول|عن|بخصوص|و|ل)|$)/i
-        );
-        if (inChannelMatch) {
-          requestedChannelQuery = inChannelMatch[1].trim();
+      if (parsedReq.explicitAccountMode) {
+        try {
+          const resolved = await resolveInteractionAccountsChoice(promptRes.action.id, {
+            mode: parsedReq.explicitAccountMode,
+            commandContext: cleanInput,
+            fromChatFlow: true,
+          });
+          thread = ensureThread();
+          return finalizeDirectReply({
+            cleanInput,
+            turnStartedAt,
+            thread,
+            draftId: resolved.draft.id,
+            navigation: resolved.navigation,
+            createdAccounts: resolved.createdAccounts,
+            replyText: resolved.replyText,
+            toolSteps: [
+              ...(resolved.createdAccounts.length > 0
+                ? [
+                    {
+                      toolName: 'create_user_accounts',
+                      labelAr: `إنشاء ${resolved.createdAccounts.length} حسابات (user)`,
+                      status: 'ok' as const,
+                      summaryAr: `تم تسجيل ${resolved.createdAccounts.length} حساب فعلي.`,
+                    },
+                  ]
+                : []),
+              {
+                toolName: 'prepare_virtual_persona_interactions',
+                labelAr: `توليد ${resolved.draft.items.length} تفاعلات باللهجة اليمنية`,
+                status: 'pending_confirmation',
+                summaryAr: `جاهزة للمراجعة لقناة «${ch.name}».`,
+              },
+            ],
+          });
+        } catch {
+          // Fall back cleanly to presenting the two choices if explicit mode failed (e.g. 0 existing accounts)
         }
       }
 
-      const ch = await resolveChannelTarget(requestedChannelQuery || (!thread.activeChannelId ? 'القناة العامة' : null), thread);
-      if (ch) {
-        const intervalSeconds = clampIntervalSeconds(parseIntervalSecondsFromArabic(asciiInput) ?? 0);
-        const recentMsgs = await getChannelMessages(ch.id, 10);
-        const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
-
-        const cleanTopic = rawTopic
-          .replace(/كل\s*\d+\s*(?:ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق).*$/i, '')
-          .trim();
-        const effectiveTopic =
-          cleanTopic.length >= 2
-            ? cleanTopic
-            : sampleTexts.length > 0
-            ? `التفاعل مع آخر تطورات قناة ${ch.name}`
-            : 'تفاعل إيجابي حول صفقات القناة';
-
-        const { items } = await generateDiverseVirtualPersonasWithEngine({
-          topic: effectiveTopic,
-          count,
-          channelName: ch.name,
-          recentMessagesSample: sampleTexts,
-        });
-
-        const now = Date.now();
-        const draft: AiAssistantDraft = {
-          id: makeId('aidraft'),
-          ownerId: OWNER_ID,
-          ownerUsername: OWNER_USERNAME,
-          channelId: ch.id,
-          channelName: ch.name,
-          topic: effectiveTopic,
-          status: 'pending_approval',
-          items,
-          intervalSeconds,
-          nextPublishAt: null,
-          createdAt: now,
-          updatedAt: now,
-        };
-        store.drafts![draft.id] = draft;
-        saveAiAssistantDiskStore();
-        await tryWriteFirestoreDoc('ai_assistant_drafts', draft.id, draft);
-
-        thread = await updateThreadContext({
-          activeSection: 'channels',
-          activeChannelId: ch.id,
-          activeChannelName: ch.name,
-        });
-
-        await appendAuditLog({
-          actionType: 'prepare_virtual_personas',
-          command: cleanInput,
-          target: `${ch.name} (${ch.id})`,
-          status: 'pending',
-          details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${effectiveTopic}"${
-            intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''
-          } بانتظار اعتماد المالك.`,
-        });
-
-        const replyText = [
-          `تم التوجه إلى قناة «${ch.name}» وإعداد مسودة تفاعلات من ${items.length} أعضاء يمنيين حول: "${effectiveTopic}".`,
-          intervalSeconds > 0
-            ? `سيُضبط النشر التدريجي بفاصل ${intervalSeconds} ثانية بين كل رسالة عند الاعتماد.`
-            : 'يمكنك مراجعة النصوص وتعديلها أو تحديد فاصل زمني ثم الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».',
-        ].join('\n');
-
-        return finalizeDirectReply({
-          cleanInput,
-          turnStartedAt,
-          thread,
-          draftId: draft.id,
-          navigation: { tab: 'channels', channelId: ch.id, channelName: ch.name },
-          replyText,
-          toolSteps: [
-            {
-              toolName: 'prepare_virtual_persona_interactions',
-              labelAr: `إعداد ${items.length} تفاعلات لقناة «${ch.name}»`,
-              status: 'pending_confirmation',
-              summaryAr:
-                intervalSeconds > 0
-                  ? `جاهزة للمراجعة (بفاصل ${intervalSeconds} ثانية بين كل رسالة).`
-                  : 'جاهزة للمراجعة والاعتماد قبل النشر.',
-            },
-          ],
-        });
-      }
+      thread = ensureThread();
+      return finalizeDirectReply({
+        cleanInput,
+        turnStartedAt,
+        thread,
+        pendingActionId: promptRes.action.id,
+        navigation: { tab: 'channels', channelId: ch.id, channelName: ch.name },
+        replyText: promptRes.replyText,
+        toolSteps: [
+          {
+            toolName: 'choose_interaction_accounts',
+            labelAr: `اختيار حسابات لـ ${parsedReq.count} مشاركين`,
+            status: 'pending_confirmation',
+            summaryAr: `قناة «${ch.name}» — اختر إنشاء حسابات جديدة أو من الحالية (${promptRes.existingCount} متاح).`,
+          },
+        ],
+      });
     }
   }
 
@@ -2822,7 +3410,7 @@ async function executeInternalFallbackNlu(params: {
       toolSteps.push({ toolName: 'confirm_pending', labelAr: 'إلغاء الإجراء', status: 'ok', summaryAr: cancelled.titleAr });
       return finishFallback();
     }
-    if (wantsApprove && prePending.action) {
+    if (wantsApprove && prePending.action && prePending.action.actionType !== 'choose_interaction_accounts') {
       const res = await confirmPendingAction(prePending.action.id, params.cleanInput);
       if (res.navigation) navigationDirective = res.navigation;
       replyText = res.action.resultMessage || `تم تنفيذ الإجراء: ${res.action.titleAr}.`;
@@ -2831,79 +3419,55 @@ async function executeInternalFallbackNlu(params: {
     }
   }
 
-  // 2. Virtual persona dialogue / interaction preparation (preserving active channel context or resolved channel)
-  const wantsPersonas = /(?:تفاعل|تفاعلات|تفاعلين|شخصيه|شخصيات|شخصيتين|حوار|حوارات|ردود|تعليقات|اضف رد|زيد رد)/.test(norm);
+  // 2. Persona discussion setup -> always show Two Options prompt first
+  const parsedFallbackReq = await parsePersonaDiscussionRequest(ascii, norm);
+  const wantsPersonas = Boolean(parsedFallbackReq) || /(?:تفاعل|تفاعلات|تفاعلين|شخصي|شخصيه|شخصيات|شخصيتين|حوار|حوارات|ردود|تعليقات|اضف رد|زيد رد|يتكلم|يتحدث|يطلب|تتطلب|تطلب)/.test(norm);
   if (wantsPersonas) {
-    let channelQuery: string | null = null;
-    const chMention = ascii.match(/(?:في|الى|إلى|لقناة|بقناة|قناة)\s+([a-zA-Z0-9_\u0600-\u06FF-]+(?:\s+[a-zA-Z0-9_\u0600-\u06FF-]+)?)/i);
-    if (chMention) {
-      const cand = chMention[1].trim();
-      if (!/^(?:النشطه|الحاليه|نفسها|هذه)$/i.test(normalizeArabicForMatch(cand))) {
-        channelQuery = cand;
+    let channelQuery: string | null = parsedFallbackReq?.channelQuery || null;
+    if (!channelQuery) {
+      const chMention = ascii.match(/(?:في|الى|إلى|لقناة|لقناه|بقناة|بقناه|قناة|قناه)\s+([a-zA-Z0-9_\u0600-\u06FF-]+(?:\s+[a-zA-Z0-9_\u0600-\u06FF-]+)?)/i);
+      if (chMention) {
+        const cand = chMention[1].replace(/^(?:قناه|قناة)\s+/i, '').trim();
+        if (!/^(?:النشطه|الحاليه|نفسها|هذه|معينه|محدده)$/.test(normalizeArabicForMatch(cand))) {
+          channelQuery = cand;
+        }
       }
     }
-    const ch = await resolveChannelTarget(channelQuery || (!thread.activeChannelId ? 'القناة العامة' : null), thread);
+    let ch = await resolveChannelTarget(channelQuery || (!thread.activeChannelId ? 'القناة العامة' : null), thread);
+    if (!ch) ch = await resolveChannelTarget('القناة العامة', thread);
     if (ch) {
-      const count = parsePersonaInteractionCount(ascii) ?? (prePending.draft && /(?:اضف|زيد)/.test(norm) ? 2 : 3);
-      const intervalSeconds = clampIntervalSeconds(parseIntervalSecondsFromArabic(ascii) ?? 0);
+      const count = parsedFallbackReq?.count ?? (parsePersonaInteractionCount(ascii) ?? (prePending.draft && /(?:اضف|زيد)/.test(norm) ? 2 : 3));
+      const intervalSeconds = parsedFallbackReq?.intervalSeconds ?? clampIntervalSeconds(parseIntervalSecondsFromArabic(ascii) ?? 0);
       const topicExtract = ascii.match(/(?:حول|عن|بخصوص|على|بشأن|بشان)\s+(.+)$/i);
-      const recentMsgs = await getChannelMessages(ch.id, 10);
-      const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
-      const cleanTopic = (topicExtract ? topicExtract[1] : ascii)
-        .replace(/كل\s*\d+\s*(?:ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق).*$/i, '')
-        .trim();
+      const cleanTopic = parsedFallbackReq?.topic && parsedFallbackReq.topic.length >= 2
+        ? parsedFallbackReq.topic
+        : (topicExtract ? topicExtract[1] : ascii)
+            .replace(/(?:في|داخل)\s+(?:قناه|قناة)\s+.+$/i, '')
+            .replace(/كل\s*\d+\s*(?:ثانيه|ثانية|ثواني|دقيقه|دقيقة|دقائق).*$/i, '')
+            .replace(/^(?:موضوع)\s+/i, '')
+            .trim();
       const effectiveTopic = cleanTopic || prePending.draft?.topic || `التفاعل مع موضوع قناة ${ch.name}`;
 
-      const { items } = await generateDiverseVirtualPersonasWithEngine({
-        topic: effectiveTopic,
+      const promptRes = await createInteractionAccountChoicePrompt({
+        channel: ch,
         count,
-        channelName: ch.name,
-        recentMessagesSample: sampleTexts,
-      });
-
-      const now = Date.now();
-      const draft: AiAssistantDraft = {
-        id: makeId('aidraft'),
-        ownerId: OWNER_ID,
-        ownerUsername: OWNER_USERNAME,
-        channelId: ch.id,
-        channelName: ch.name,
         topic: effectiveTopic,
-        status: 'pending_approval',
-        items,
         intervalSeconds,
-        nextPublishAt: null,
-        createdAt: now,
-        updatedAt: now,
-      };
-      store.drafts![draft.id] = draft;
-      saveAiAssistantDiskStore();
-      await tryWriteFirestoreDoc('ai_assistant_drafts', draft.id, draft);
+        commandText: params.cleanInput,
+      });
 
-      createdDraftId = draft.id;
+      createdPendingActionId = promptRes.action.id;
       navigationDirective = { tab: 'channels', channelId: ch.id, channelName: ch.name };
-      thread = await updateThreadContext({
-        activeSection: 'channels',
-        activeChannelId: ch.id,
-        activeChannelName: ch.name,
-      });
-
-      await appendAuditLog({
-        actionType: 'prepare_virtual_personas',
-        command: params.cleanInput,
-        target: `${ch.name} (${ch.id})`,
-        status: 'pending',
-        details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${effectiveTopic}" عبر المحرك الداخلي.`,
-      });
+      thread = ensureThread();
 
       toolSteps.push({
-        toolName: 'prepare_virtual_persona_interactions',
-        labelAr: `إعداد ${items.length} تفاعلات لقناة «${ch.name}»`,
+        toolName: 'choose_interaction_accounts',
+        labelAr: `اختيار حسابات لـ ${count} مشاركين`,
         status: 'pending_confirmation',
-        summaryAr: intervalSeconds > 0 ? `جاهزة للمراجعة (كل ${intervalSeconds} ثانية).` : 'جاهزة للمراجعة والاعتماد قبل النشر.',
+        summaryAr: `قناة «${ch.name}» — اختر إنشاء حسابات جديدة أو من الحالية (${promptRes.existingCount} متاح).`,
       });
 
-      replyText = `تم تجهيز مسودة من ${items.length} مشاركين يمنيين لقناة «${ch.name}» حول: "${effectiveTopic}".\nيمكنك تعديلها أو الضغط على «اعتماد ونشر» أو الرد بـ «اعتمد».`;
+      replyText = promptRes.replyText;
       return finishFallback();
     }
   }
@@ -3227,7 +3791,8 @@ export async function processOwnerAiChat(userText: string): Promise<{
             };
           }
         } else if (name === 'prepare_virtual_persona_interactions') {
-          const ch = await resolveChannelTarget(args.channelQuery || 'القناة العامة', thread);
+          let ch = await resolveChannelTarget(args.channelQuery || 'القناة العامة', thread);
+          if (!ch) ch = await resolveChannelTarget('القناة العامة', thread);
           if (!ch) {
             toolSteps.push({
               toolName: name,
@@ -3240,68 +3805,108 @@ export async function processOwnerAiChat(userText: string): Promise<{
             const count = Math.max(1, Math.min(30, Math.floor(Number(args.count) || 5)));
             const intervalSeconds = clampIntervalSeconds(args.intervalSeconds);
             const topic = String(args.topic || 'تفاعل إيجابي حول الصفقة').trim();
-            const recentMsgs = await getChannelMessages(ch.id, 10);
-            const sampleTexts = recentMsgs.map((m) => m.text).filter((x): x is string => Boolean(x));
+            const reqMode = String(args.accountMode || 'ask').toLowerCase();
 
-            const { items } = await generateDiverseVirtualPersonasWithEngine({
-              topic,
+            const promptRes = await createInteractionAccountChoicePrompt({
+              channel: ch,
               count,
-              channelName: ch.name,
-              recentMessagesSample: sampleTexts,
-            });
-
-            const now = Date.now();
-            const draft: AiAssistantDraft = {
-              id: makeId('aidraft'),
-              ownerId: OWNER_ID,
-              ownerUsername: OWNER_USERNAME,
-              channelId: ch.id,
-              channelName: ch.name,
               topic,
-              status: 'pending_approval',
-              items,
               intervalSeconds,
-              nextPublishAt: null,
-              createdAt: now,
-              updatedAt: now,
-            };
-            store.drafts![draft.id] = draft;
-            saveAiAssistantDiskStore();
-            await tryWriteFirestoreDoc('ai_assistant_drafts', draft.id, draft);
-
-            createdDraftId = draft.id;
-            thread = await updateThreadContext({
-              activeChannelId: ch.id,
-              activeChannelName: ch.name,
+              commandText: cleanInput,
             });
+            thread = ensureThread();
 
-            await appendAuditLog({
-              actionType: 'prepare_virtual_personas',
-              command: cleanInput,
-              target: `${ch.name} (${ch.id})`,
-              status: 'pending',
-              details: `تم إعداد مسودة ${items.length} تفاعلات يمنية حول "${topic}"${intervalSeconds > 0 ? ` (بفاصل ${intervalSeconds} ثانية بين كل رسالة)` : ''} بانتظار اعتماد المالك.`,
+            if (reqMode === 'create_new' || reqMode === 'select_existing') {
+              const resolved = await resolveInteractionAccountsChoice(promptRes.action.id, {
+                mode: reqMode,
+                commandContext: cleanInput,
+                fromChatFlow: true,
+              });
+              createdDraftId = resolved.draft.id;
+              navigationDirective = resolved.navigation;
+              if (resolved.createdAccounts.length > 0) {
+                createdAccountsBatch = [...createdAccountsBatch, ...resolved.createdAccounts];
+              }
+              toolSteps.push({
+                toolName: name,
+                labelAr: `توليد ${resolved.draft.items.length} تفاعلات باللهجة اليمنية`,
+                status: 'pending_confirmation',
+                summaryAr: `جاهزة للمراجعة لقناة «${ch.name}».`,
+              });
+              toolResult = {
+                status: 'pending_approval',
+                draftId: resolved.draft.id,
+                channelId: ch.id,
+                channelName: ch.name,
+                topic,
+                intervalSeconds,
+                count: resolved.draft.items.length,
+                createdAccountsCount: resolved.createdAccounts.length,
+                items: resolved.draft.items.map((it, idx) => ({
+                  index: idx + 1,
+                  personaName: it.personaName,
+                  dialect: it.dialect,
+                  text: it.text,
+                })),
+              };
+            } else {
+              createdPendingActionId = promptRes.action.id;
+              navigationDirective = { tab: 'channels', channelId: ch.id, channelName: ch.name };
+              toolSteps.push({
+                toolName: 'choose_interaction_accounts',
+                labelAr: `اختيار حسابات لـ ${count} مشاركين`,
+                status: 'pending_confirmation',
+                summaryAr: `خياران بانتظار المالك (${promptRes.existingCount} حساب حالي متاح).`,
+              });
+              toolResult = {
+                status: 'awaiting_account_mode_choice',
+                actionId: promptRes.action.id,
+                channelId: ch.id,
+                channelName: ch.name,
+                count,
+                topic,
+                existingAccountsCount: promptRes.existingCount,
+                options: [
+                  { mode: 'create_new', labelAr: `إنشاء ${count} حسابات جديدة` },
+                  { mode: 'select_existing', labelAr: `اختيار من الحسابات الحالية (${promptRes.existingCount})` },
+                ],
+              };
+            }
+          }
+        } else if (name === 'resolve_interaction_accounts') {
+          const targetAction = prePending.action?.actionType === 'choose_interaction_accounts' ? prePending.action : null;
+          if (!targetAction) {
+            toolResult = { error: 'لا يوجد طلب معلق بانتظار اختيار الحسابات حالياً.' };
+          } else {
+            const mode = String(args.mode || 'create_new') === 'select_existing' ? 'select_existing' : 'create_new';
+            const selectedIds = Array.isArray(args.selectedUserIds)
+              ? args.selectedUserIds.map((x: unknown) => Number(x)).filter((n: number) => Number.isFinite(n) && n > 0)
+              : undefined;
+            const resolved = await resolveInteractionAccountsChoice(targetAction.id, {
+              mode,
+              selectedUserIds: selectedIds,
+              commandContext: cleanInput,
+              fromChatFlow: true,
             });
-
+            createdDraftId = resolved.draft.id;
+            navigationDirective = resolved.navigation;
+            if (resolved.createdAccounts.length > 0) {
+              createdAccountsBatch = [...createdAccountsBatch, ...resolved.createdAccounts];
+            }
             toolSteps.push({
               toolName: name,
-              labelAr: `إعداد ${items.length} تفاعلات لقناة «${ch.name}»`,
+              labelAr: `توليد ${resolved.draft.items.length} تفاعلات باللهجة اليمنية`,
               status: 'pending_confirmation',
-              summaryAr:
-                intervalSeconds > 0
-                  ? `جاهزة للمراجعة (بفاصل ${intervalSeconds} ثانية بين كل رسالة).`
-                  : 'جاهزة للمراجعة والاعتماد قبل النشر.',
+              summaryAr: `جاهزة للمراجعة لقناة «${resolved.draft.channelName}».`,
             });
-
             toolResult = {
               status: 'pending_approval',
-              draftId: draft.id,
-              channelId: ch.id,
-              channelName: ch.name,
-              topic,
-              intervalSeconds,
-              count: items.length,
-              items: items.map((it, idx) => ({
+              draftId: resolved.draft.id,
+              channelId: resolved.draft.channelId,
+              channelName: resolved.draft.channelName,
+              count: resolved.draft.items.length,
+              createdAccountsCount: resolved.createdAccounts.length,
+              items: resolved.draft.items.map((it, idx) => ({
                 index: idx + 1,
                 personaName: it.personaName,
                 dialect: it.dialect,
